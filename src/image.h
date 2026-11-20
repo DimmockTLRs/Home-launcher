@@ -25,7 +25,7 @@ int init_svg(void);
 int load_font(TextInfo *info, const char *default_font);
 void quit_svg(void);
 void render_scroll_indicators(Scroll *scroll, int height, Geometry *geo);
-SDL_Surface *load_next_slideshow_background(Slideshow *slideshow, bool transition);
+SDL_Surface *load_next_slideshow_background(Slideshow *slideshow);
 int load_next_slideshow_background_async(void *data);
 SDL_Texture *load_texture(SDL_Surface *surface);
 SDL_Texture *load_texture_from_file(const char *path);

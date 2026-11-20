@@ -25,8 +25,9 @@ static int load_menu_by_name(const char *menu_name, bool set_back_menu, bool res
 static void update_slideshow(void);
 static void resume_slideshow(void);
 static void update_screensaver(void);
-static void update_clock(bool block);
+static void update_clock(void);
 static void init_slideshow(void);
+static void quit_slideshow(void);
 static void init_screensaver(void);
 static void calculate_button_geometry(Entry *entry, int buttons);
 static void render_buttons(Menu *menu);
@@ -175,9 +176,7 @@ Gamepad *gamepads                     = NULL;
 GamepadControl *gamepad_controls      = NULL;
 Hotkey *hotkeys                       = NULL;
 Clock *clk                            = NULL;
-TTF_Font *clock_font                  = NULL;
-SDL_Thread *Slideshowhread            = NULL;
-SDL_Thread *clock_thread              = NULL;
+static SDL_Thread *slideshow_thread    = NULL;
 SDL_Event event;
 SDL_SysWMinfo wm_info;
 SDL_DisplayMode display_mode;
@@ -206,10 +205,15 @@ static void init_sdl()
     if (SDL_Init(sdl_flags) < 0)
         log_fatal("Could not initialize SDL\n%s", SDL_GetError());
 
-    SDL_GetDesktopDisplayMode(0, &display_mode);
+    if (SDL_GetDesktopDisplayMode(0, &display_mode) < 0)
+        log_fatal("Could not read desktop display mode: %s", SDL_GetError());
+    if (display_mode.refresh_rate <= 0) {
+        log_debug("Desktop refresh rate unavailable, using 60 Hz for timing");
+        display_mode.refresh_rate = 60;
+    }
     geo.screen_width = display_mode.w;
     geo.screen_height = display_mode.h;
-    refresh_period = 1000 / (Uint32) display_mode.refresh_rate;
+    refresh_period = SDL_max(1u, 1000 / (Uint32) display_mode.refresh_rate);
     geo.screen_margin = (int) (SCREEN_MARGIN * (float) geo.screen_height);
 }
 
@@ -231,12 +235,12 @@ static void create_window()
     Uint32 renderer_flags = SDL_RENDERER_ACCELERATED;
     if (!config.vsync) {
         if (config.fps_limit > MIN_FPS_LIMIT && config.fps_limit <= display_mode.refresh_rate)
-            refresh_period = 1000 / (Uint32) config.fps_limit;
+            refresh_period = SDL_max(1u, 1000 / (Uint32) config.fps_limit);
         else
             config.vsync = true;
     }
     if (config.vsync) {
-        refresh_period = 1000 / (Uint32) display_mode.refresh_rate;
+        refresh_period = SDL_max(1u, 1000 / (Uint32) display_mode.refresh_rate);
         renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
     }
     if (config.gamepad_enabled) {
@@ -245,20 +249,21 @@ static void create_window()
         if (!repeat_period)
             repeat_period = 1;
     }
-    if (slideshow != NULL)
+    if (slideshow != NULL && config.slideshow_transition_time > 0)
         slideshow->transition_change_rate = 255.0f / ((float) config.slideshow_transition_time / (float) refresh_period);
 
     renderer = SDL_CreateRenderer(window, -1, renderer_flags);
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
     if (renderer == NULL)
         log_fatal("Could not initialize renderer\n%s", SDL_GetError());
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
     // Set background color
     set_draw_color();
 
 #ifdef _WIN32
     SDL_VERSION(&wm_info.version);
-    SDL_GetWindowWMInfo(window, &wm_info);
+    if (!SDL_GetWindowWMInfo(window, &wm_info))
+        log_fatal("Could not get the Windows launcher window: %s", SDL_GetError());
     if (config.background_mode == BACKGROUND_TRANSPARENT)
         make_window_transparent();
 #endif
@@ -322,9 +327,13 @@ static void init_sdl_ttf()
 // A function to close subsystems and free memory before quitting
 static void cleanup()
 {
-    // Wait until all threads have completed
-    SDL_WaitThread(Slideshowhread, NULL);
-    SDL_WaitThread(clock_thread, NULL);
+    quit_slideshow();
+    if (gamepads != NULL)
+        disconnect_gamepad(-1, true, true);
+    if (title_info.font != NULL)
+        TTF_CloseFont(title_info.font);
+    if (clk != NULL && clk->text_info.font != NULL)
+        TTF_CloseFont(clk->text_info.font);
     
     // Destroy renderer and window
     if (renderer != NULL) {
@@ -337,12 +346,10 @@ static void cleanup()
     }
 
     // Quit subsystems
-    SDL_Quit();
-    IMG_Quit();
-    TTF_Quit();
     quit_svg();
-    if (config.background_mode == BACKGROUND_SLIDESHOW)
-        quit_slideshow();
+    TTF_Quit();
+    IMG_Quit();
+    SDL_Quit();
 
     // Close log file if open
     if (log_file != NULL)
@@ -352,7 +359,7 @@ static void cleanup()
     free(config.default_menu);
     free(config.background_image);
     free(config.title_font_path);
-    free(config.exe_path);
+    SDL_free(config.exe_path);
     free(config.slideshow_directory);
     free(config.clock_font_path);
     free(config.gamepad_mappings_file);
@@ -402,9 +409,6 @@ static void cleanup()
         tmp_gamepad = i;
     }
     free(tmp_gamepad);
-
-    if (config.gamepad_enabled)
-        disconnect_gamepad(-1, false, true);
 }
 
 // A function to handle key presses from keyboard
@@ -445,30 +449,43 @@ static void handle_keypress(SDL_Keysym *key)
 }
 
 // A function to quit the slideshow mode in case of error or program exit
-void quit_slideshow()
+static void quit_slideshow(void)
 {
+    if (slideshow == NULL)
+        return;
+    if (slideshow_thread != NULL) {
+        SDL_WaitThread(slideshow_thread, NULL);
+        slideshow_thread = NULL;
+    }
+    SDL_FreeSurface(slideshow->transition_surface);
+    if (slideshow->transition_texture != NULL)
+        SDL_DestroyTexture(slideshow->transition_texture);
+    state.slideshow_transition = false;
+
     // Free allocated image paths
     for (int i = 0; i < slideshow->num_images; i++)
         free(slideshow->images[i]);
     free(slideshow->images);
     free(slideshow->order);
     free(slideshow);
+    slideshow = NULL;
 }
 
 // A function to initialize the slideshow background mode
 static void init_slideshow()
 {
-    if (!directory_exists(config.slideshow_directory)) {
+    if (config.slideshow_directory == NULL || !directory_exists(config.slideshow_directory)) {
         log_error("Slideshow directory '%s' does not exist, "
             "Switching to color background mode",
-            config.slideshow_directory
+            config.slideshow_directory != NULL ? config.slideshow_directory : "(unset)"
         );
         config.background_mode = BACKGROUND_COLOR;
-        set_draw_color();
         return;
     }
     // Allocate and initialize slideshow struct
     slideshow = malloc(sizeof(Slideshow));
+    if (slideshow == NULL)
+        log_fatal("Could not allocate slideshow state");
     *slideshow = (Slideshow) {
         .i = -1,
         .num_images = 0,
@@ -506,6 +523,8 @@ static void init_slideshow()
     // Generate array of random numbers for image order, load first image
     else {
         slideshow->order = malloc(sizeof(int) * (size_t) slideshow->num_images);
+        if (slideshow->order == NULL)
+            log_fatal("Could not allocate slideshow order");
         random_array(slideshow->order, slideshow->num_images);
         if (config.debug)
             debug_slideshow(slideshow);
@@ -825,6 +844,10 @@ static void execute_command(const char *command)
     char *cmd = strdup(command);
 
     // Parse special commands
+    if (cmd == NULL) {
+        log_error("Could not copy the launch command");
+        return;
+    }
     if (cmd[0] == ':') {
         char *delimiter = " ";
         char *special_command = strtok(cmd, delimiter);
@@ -860,10 +883,11 @@ static void execute_command(const char *command)
 
     // Launch external application
     else {
-        SDL_Delay(50);
         if (start_process(cmd, true)) {
             state.application_launching = true;
-            ticks.application_launched = ticks.main;
+            ticks.application_launched = SDL_GetTicks();
+            log_debug("Waiting for focus handoff (timeout %u ms)",
+                (unsigned)config.application_timeout);
             if (config.on_launch == ON_LAUNCH_BLANK)
                 SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xFF);
             else if (config.on_launch == ON_LAUNCH_QUIT)
@@ -889,12 +913,17 @@ static void init_gamepad(Gamepad **gamepad, int device_index)
 // A function to open the SDL controller
 static void open_controller(Gamepad *gamepad, bool raise_error)
 {
+    if (gamepad->controller != NULL)
+        return;
     gamepad->controller = SDL_GameControllerOpen(gamepad->device_index);
     if (gamepad->controller == NULL) {
         if (raise_error)
-            log_error("Could not open gamepad at device index %i", config.gamepad_device);
+            log_error("Could not open gamepad at device index %i: %s", gamepad->device_index, SDL_GetError());
+        else
+            log_debug("Could not reopen gamepad at device index %i: %s", gamepad->device_index, SDL_GetError());
         return;
     }
+    log_debug("Opened gamepad at device index %i (instance %i)", gamepad->device_index, gamepad->id);
     if (config.debug && raise_error) {
         char *mapping = SDL_GameControllerMapping(gamepad->controller);
         log_debug("Gamepad Mapping:\n%s", mapping);
@@ -906,9 +935,12 @@ static void open_controller(Gamepad *gamepad, bool raise_error)
 static void connect_gamepad(int device_index, bool open, bool raise_error)
 {
     if (device_index >= 0) {
+        SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(device_index);
+        if (id < 0)
+            return;
         Gamepad *gamepad = NULL;
         for (gamepad = gamepads; gamepad != NULL; gamepad = gamepad->next) {
-            if (gamepad->id == device_index)
+            if (gamepad->id == id)
                 break;
         }
         if (gamepad == NULL) {
@@ -928,8 +960,17 @@ static void connect_gamepad(int device_index, bool open, bool raise_error)
             open_controller(gamepad, raise_error);
     }
     else if (open) {
-        for (Gamepad *i = gamepads; i != NULL; i = i->next)
-            open_controller(i, raise_error);
+        int count = SDL_NumJoysticks();
+        for (int index = 0; index < count; index++) {
+            SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(index);
+            for (Gamepad *i = gamepads; i != NULL; i = i->next) {
+                if (i->id == id) {
+                    i->device_index = index;
+                    open_controller(i, raise_error);
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -938,7 +979,7 @@ static void disconnect_gamepad(int id, bool disconnect, bool remove)
 {
     for (Gamepad *i = gamepads; i != NULL;) {
         if (id < 0 || i->id == id) {
-            if (disconnect)
+            if (disconnect && i->controller != NULL)
                 SDL_GameControllerClose(i->controller);
             if (remove) {
                 if (i->next != NULL)
@@ -969,6 +1010,9 @@ static void poll_gamepad()
     for (GamepadControl *i = gamepad_controls; i != NULL; i = i->next) {
         pressed = false;
         for (Gamepad *gamepad = gamepads; gamepad != NULL; gamepad = gamepad->next) {
+
+            if (gamepad->controller == NULL)
+                continue;
 
             // Check if axis value exceeds dead zone
             if (i->type == TYPE_AXIS_POS || i->type == TYPE_AXIS_NEG) {
@@ -1014,32 +1058,40 @@ static void poll_gamepad()
 // A function to update the slideshow
 static void update_slideshow()
 {
-    // If image duration time has elapsed, load the next image and start the transition
-    if (!state.slideshow_transition && (ticks.main - ticks.slideshow_load > config.slideshow_image_duration) &&
-    !state.slideshow_paused) {
-        
-        // Render the new background image in a separate thread so we don't block the main thread
-        if (!state.slideshow_background_rendering && !state.slideshow_background_ready) {
-            Slideshowhread = SDL_CreateThread(load_next_slideshow_background_async, "Slideshow Thread", (void*) slideshow);
-            state.slideshow_background_rendering = true;
+    if (!state.slideshow_transition && !state.slideshow_paused &&
+        ticks.main - ticks.slideshow_load > config.slideshow_image_duration) {
+        if (slideshow_thread == NULL) {
+            SDL_AtomicSet(&slideshow->decode_ready, 0);
+            slideshow_thread = SDL_CreateThread(load_next_slideshow_background_async,
+                "Slideshow Thread", slideshow);
+            if (slideshow_thread == NULL) {
+                log_error("Could not start slideshow worker: %s", SDL_GetError());
+                ticks.slideshow_load = ticks.main;
+            }
         }
+        else if (SDL_AtomicGet(&slideshow->decode_ready)) {
+            SDL_WaitThread(slideshow_thread, NULL);
+            slideshow_thread = NULL;
+            SDL_Texture *texture = load_texture(slideshow->transition_surface);
+            slideshow->transition_surface = NULL;
 
-        // Convert background to texture after the rendering thread has completed
-        else if (state.slideshow_background_ready) {
-            SDL_WaitThread(Slideshowhread, NULL);
-            Slideshowhread = NULL;
-            if (config.slideshow_transition_time > 0) {
-                slideshow->transition_texture = load_texture(slideshow->transition_surface);
-                SDL_SetTextureAlphaMod(slideshow->transition_texture, 0);
+            if (texture == NULL) {
+                log_debug("Slideshow kept the current image: no replacement texture available");
+                ticks.slideshow_load = ticks.main;
+            }
+            else if (config.slideshow_transition_time > 0) {
+                log_debug("Starting slideshow crossfade to image %i of %i",
+                    slideshow->i + 1, slideshow->num_images);
+                SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+                SDL_SetTextureAlphaMod(texture, 0);
+                slideshow->transition_texture = texture;
                 state.slideshow_transition = true;
             }
             else {
                 SDL_DestroyTexture(background_texture);
-                background_texture = load_texture(slideshow->transition_surface);
+                background_texture = texture;
                 ticks.slideshow_load = ticks.main;
             }
-        slideshow->transition_surface = NULL;
-        state.slideshow_background_ready = false;
         }
     }
     else if (state.slideshow_transition) {
@@ -1103,49 +1155,42 @@ static void update_screensaver()
 }
 
 // A function to update the clock display
-static void update_clock(bool block)
+static void update_clock(void)
 {
-    if (ticks.main - ticks.clock_update > CLOCK_UPDATE_PERIOD) {
-        if (!state.clock_rendering) {
+    if (ticks.main - ticks.clock_update <= CLOCK_UPDATE_PERIOD)
+        return;
+    ticks.clock_update = ticks.main;
+    get_time(clk);
+    if (!clk->render_time)
+        return;
 
-            // Check to see if the time has changed
-            get_time(clk);
-            if (clk->render_time) {
-                state.clock_rendering = true;
-                if (block)
-                    render_clock(clk);
-                else
-                    clock_thread = SDL_CreateThread(render_clock_async, "Clock Thread", (void*) clk); 
-            }
-            else
-                ticks.clock_update = ticks.main;
-        }
-
-        // Render texture
-        if (state.clock_ready) {
-            SDL_WaitThread(clock_thread, NULL);
-            clock_thread = NULL;
-            SDL_DestroyTexture(clk->time_texture);
-            clk->time_texture = load_texture(clk->time_surface);
-            clk->time_surface = NULL;
-            if (clk->render_date) {
-                SDL_DestroyTexture(clk->date_texture);
-                clk->date_texture = load_texture(clk->date_surface);
-                clk->date_surface = NULL;
-            }
-            ticks.clock_update = ticks.main;
-            clk->render_time = false;
-            clk->render_date = false;
-            state.clock_rendering = false;
-            state.clock_ready = false;
+    render_clock(clk);
+    SDL_Texture *time = load_texture(clk->time_surface);
+    clk->time_surface = NULL;
+    if (time != NULL) {
+        SDL_DestroyTexture(clk->time_texture);
+        clk->time_texture = time;
+    }
+    if (clk->render_date) {
+        SDL_Texture *date = load_texture(clk->date_surface);
+        clk->date_surface = NULL;
+        if (date != NULL) {
+            SDL_DestroyTexture(clk->date_texture);
+            clk->date_texture = date;
         }
     }
+    clk->render_time = false;
+    clk->render_date = false;
 }
 
 static inline void pre_launch()
 {
-    if (gamepads != NULL)
+    if (gamepads != NULL) {
+        log_debug("Releasing gamepads during application handoff");
         disconnect_gamepad(-1, true, false);
+        for (GamepadControl *control = gamepad_controls; control != NULL; control = control->next)
+            control->repeat = 0;
+    }
 
 // Initialize exit hotkey for Windows
 #ifdef _WIN32
@@ -1164,7 +1209,7 @@ static inline void post_launch()
     if (config.gamepad_enabled)
         connect_gamepad(-1, true, false);
     if (config.clock_enabled)
-        update_clock(true);
+        update_clock();
     if (config.background_mode == BACKGROUND_SLIDESHOW)
         resume_slideshow();
     if (config.on_launch == ON_LAUNCH_BLANK)
@@ -1188,8 +1233,10 @@ void quit(int status)
             NULL
         );
     if (config.quit_cmd != NULL) {
-        execute_command(config.quit_cmd);
-        free(config.quit_cmd);
+        char *command = config.quit_cmd;
+        config.quit_cmd = NULL;
+        execute_command(command);
+        free(command);
     }
     cleanup();
     exit(status);
@@ -1275,8 +1322,13 @@ int main(int argc, char *argv[])
 
     // Render first slideshow image
     else if (config.background_mode == BACKGROUND_SLIDESHOW) {
-        SDL_Surface *surface = load_next_slideshow_background(slideshow, false);
-        background_texture = load_texture(surface);
+        background_texture = load_texture(load_next_slideshow_background(slideshow));
+        if (background_texture == NULL) {
+            log_error("Could not load a slideshow background from '%s'", config.slideshow_directory);
+            quit_slideshow();
+            config.background_mode = BACKGROUND_COLOR;
+            set_draw_color();
+        }
     }
 
     // Initialize screensaver
@@ -1285,7 +1337,9 @@ int main(int argc, char *argv[])
 
     // Initialize clock
     if (config.clock_enabled) {
-        clk = malloc(sizeof(Clock));
+        clk = calloc(1, sizeof(Clock));
+        if (clk == NULL)
+            log_fatal("Could not allocate clock state");
         init_clock(clk);
         ticks.clock_update = ticks.main;
     }
@@ -1382,19 +1436,26 @@ int main(int argc, char *argv[])
                     break;
 
                 case SDL_JOYDEVICEREMOVED:
-                    if (SDL_IsGameController(event.jdevice.which) == SDL_TRUE || 1) {
-                        log_debug("Gamepad disconnected");
-                        if (config.gamepad_device < 0 || config.gamepad_device == event.jdevice.which)
-                            disconnect_gamepad(event.jdevice.which, true, true);
-                    }
+                    log_debug("Joystick disconnected (instance %i)", event.jdevice.which);
+                    disconnect_gamepad(event.jdevice.which, true, true);
+                    break;
+
+                case SDL_RENDER_TARGETS_RESET:
+                case SDL_RENDER_DEVICE_RESET:
+                    log_debug("SDL renderer reset (event %u)", (unsigned)event.type);
                     break;
 
                 case SDL_WINDOWEVENT:
                     if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
-                        log_debug("Lost keyboard focus");
+                        log_debug("Lost keyboard focus (launching=%i, running=%i)",
+                            state.application_launching, state.application_running);
+#ifdef _WIN32
+                        debug_foreground_window();
+#endif
                         state.has_focus = false;
                         if (state.application_launching) {
-                            log_debug("Application detected");
+                            log_debug("Focus handoff observed %u ms after launch",
+                                (unsigned)(SDL_GetTicks() - ticks.application_launched));
                             state.application_launching = false;
                             state.application_running = true;
                             pre_launch();
@@ -1408,7 +1469,11 @@ int main(int argc, char *argv[])
 #endif
                     }
                     else if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
-                        log_debug("Gained keyboard focus");
+                        log_debug("Gained keyboard focus (launching=%i, running=%i)",
+                            state.application_launching, state.application_running);
+#ifdef _WIN32
+                        debug_foreground_window();
+#endif
                         state.has_focus = true;
                     }
                     else if (event.window.event == SDL_WINDOWEVENT_LEAVE)
@@ -1426,7 +1491,7 @@ int main(int argc, char *argv[])
         if (state.application_running && state.has_focus) {
             state.application_running = false;
             post_launch();
-            log_debug("Application finished");
+            log_debug("Launcher restored after regaining focus");
         }
 
         // Post-event loop updates
@@ -1438,10 +1503,14 @@ int main(int argc, char *argv[])
             if (config.screensaver_enabled)
                 update_screensaver();
             if (config.clock_enabled)
-                update_clock(false);
+                update_clock();
         }
         if (state.application_launching &&
-        ticks.main - ticks.application_launched > config.application_timeout) {
+        SDL_GetTicks() - ticks.application_launched >= config.application_timeout) {
+            log_debug("Launch wait expired without a focus handoff");
+#ifdef _WIN32
+            debug_foreground_window();
+#endif
             state.application_launching = false;
             if (config.on_launch == ON_LAUNCH_BLANK)
                 set_draw_color();

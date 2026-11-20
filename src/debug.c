@@ -13,13 +13,13 @@
 #include "platform/unix.h"
 #endif
 
-static int init_log(void);
+static void init_log(void);
 
 extern Config config;
 extern FILE *log_file;
 
 // A function to initialize the logging subsystem
-static int init_log()
+static void init_log(void)
 {
     // Determine log path
     char log_file_path[MAX_PATH_CHARS + 1];
@@ -34,21 +34,17 @@ static int init_log()
 
     // Open log
     log_file = fopen(log_file_path, "wb");
-    if (log_file == NULL) {
-#ifdef __unix__
-        printf("Failed to create log file");
-#endif
-        quit(EXIT_FAILURE);
-    }
-print_version(log_file);
-fputs("\n", log_file);
-print_compiler_info(log_file);
-fputs("\n", log_file);
+    if (log_file == NULL)
+        return;
+
+    print_version(log_file);
+    fputs("\n", log_file);
+    print_compiler_info(log_file);
+    fputs("\n", log_file);
 #ifdef __unix__
     if (config.debug)
         printf("Debug mode enabled\nLog is outputted to %s\n", log_file_path);
 #endif
-    return 0;
 }
 
 // A function to output a printf-style formatted line to the log
@@ -59,23 +55,29 @@ void output_log(LogLevel log_level, const char *format, ...)
         return;
 
     // Initialize logging if not already initialized
-    if (log_file == NULL)
+    static bool log_attempted = false;
+    if (!log_attempted) {
+        log_attempted = true;
         init_log();
+    }
     
     // Output log
-    static char buffer[MAX_LOG_LINE_BYTES];
+    char buffer[MAX_LOG_LINE_BYTES];
     va_list args;
     va_start(args, format);
-    size_t length = (size_t) vsnprintf(buffer, MAX_LOG_LINE_BYTES - 1, format, args);
-    fwrite(buffer, 1, length, log_file);
-    if (config.debug)
-        fflush(log_file);
-    
-#ifdef __unix__
-    if (log_level > LOGLEVEL_DEBUG)
-        fputs(buffer, stderr);
-#endif
+    int length = vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
+    if (length >= 0) {
+        if (log_file != NULL) {
+            fputs(buffer, log_file);
+            if (config.debug || log_level == LOGLEVEL_FATAL)
+                fflush(log_file);
+        }
+#ifdef __unix__
+        if (log_level > LOGLEVEL_DEBUG)
+            fputs(buffer, stderr);
+#endif
+    }
 
     if (log_level == LOGLEVEL_FATAL)
         quit(EXIT_FAILURE);

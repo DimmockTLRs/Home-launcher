@@ -185,12 +185,25 @@ int image_filter(const struct dirent *file)
 void scan_slideshow_directory(Slideshow *slideshow, const char *directory)
 {
     struct dirent **files;
-    slideshow->num_images = scandir(directory, &files, image_filter, NULL);
-    slideshow->images = malloc((size_t) slideshow->num_images * sizeof(char*));
+    int count = scandir(directory, &files, image_filter, NULL);
+    if (count < 0) {
+        log_error("Could not scan slideshow directory '%s'", directory);
+        return;
+    }
+    if (count == 0) {
+        free(files);
+        return;
+    }
+
+    slideshow->images = malloc((size_t) count * sizeof(char *));
     char file_path[MAX_PATH_CHARS + 1];
-    for (int i = 0; i < slideshow->num_images; i++) {
-        join_paths(file_path, sizeof(file_path), 2, directory, files[i]->d_name);
-        slideshow->images[i] = strdup(file_path);
+    for (int i = 0; i < count; i++) {
+        if (slideshow->images != NULL) {
+            join_paths(file_path, sizeof(file_path), 2, directory, files[i]->d_name);
+            char *path = strdup(file_path);
+            if (path != NULL)
+                slideshow->images[slideshow->num_images++] = path;
+        }
         free(files[i]);
     }
     free(files);

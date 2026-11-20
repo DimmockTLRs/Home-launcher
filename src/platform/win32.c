@@ -4,7 +4,6 @@
 #include <string.h>
 #include <stdbool.h>
 #include <windows.h>
-#include <psapi.h>
 #include <SDL.h>
 #include <SDL_syswm.h>
 #include "../launcher.h"
@@ -14,9 +13,6 @@
 #include "../debug.h"
 #include "slideshow.h"
 
-static void parse_command(char *cmd, char *file, size_t file_size, char **params);
-static char *path_basename(const char *path);
-static bool is_browser(const char *exe_basename);
 static UINT sdl_to_win32_keycode(SDL_Keycode keycode);
 static bool get_shutdown_privilege(void);
 
@@ -47,66 +43,45 @@ bool directory_exists(const char *path)
 }
 
 // A function that parses the command string into a file and parameters
-static void parse_command(char *cmd, char *file, size_t file_size, char **params)
+static bool parse_command(const char *cmd, char *file, size_t file_size, const char **params)
 {
-    char *start = NULL;
-    char *quote_begin = NULL;
-    char *quote_end = NULL;
-    char *p = cmd;
-    file[0] = '\0';
-
-    // Skip any whitespace at beginning of command
-    while (*p == ' ')
-        p++;
-    start = p;
-
-    // Check for quote, in which case ignore spaces until the end quote is detecetd
-    if (*p == '"')
-        quote_begin = p;
-
-    while (*p != '\0') {
-        // If the quote is complete, copy the file
-        if (*p == '"' && p != quote_begin) {
-            quote_end = p;
-            *p = '\0';
-            copy_string(file, quote_begin + 1, file_size);
-        }
-
-        else if (*p == ' ') {
-            // If a space was detected but there hasn't been a quote detected yet, this is the end of the file
-            if (!quote_begin) {
-                *p = '\0';
-                copy_string(file, start, file_size);
-                p++;
-
-                // Skip any preceding white space for parameters
-                while (*p == ' ')
-                    p++;
-
-                // Copy parameters
-                if (*p != '\0')
-                    *params = strdup(p);
-                    break;
-            }
-
-            // If a space was detected after the quote
-            else if (quote_begin && quote_end) {
-                // Skip any preceding white space for parameters
-                while (*p == ' ')
-                    p++;
-
-                // Copy rest of command as parameters
-                if (*p != '\0')
-                    *params = strdup(p);
-                break;
-            }
-        }
-        p++;
+    const char *start = cmd + strspn(cmd, " \t");
+    const char *end;
+    const char *rest;
+    if (*start == '"') {
+        start++;
+        end = strchr(start, '"');
+        if (end == NULL || (end[1] != '\0' && end[1] != ' ' && end[1] != '\t'))
+            return false;
+        rest = end + 1;
+    }
+    else {
+        end = start + strcspn(start, " \t");
+        rest = end;
     }
 
-    // If there were no quotes or spaces, copy whole command into file buffer
-    if (start && file[0] == '\0')
-        copy_string(file, start, file_size);
+    size_t length = (size_t)(end - start);
+    if (length == 0 || length >= file_size)
+        return false;
+    memcpy(file, start, length);
+    file[length] = '\0';
+    rest += strspn(rest, " \t");
+    *params = *rest != '\0' ? rest : NULL;
+    return true;
+}
+
+void debug_foreground_window(void)
+{
+    if (!config.debug)
+        return;
+
+    HWND foreground = GetForegroundWindow();
+    DWORD pid = 0;
+    if (foreground != NULL)
+        GetWindowThreadProcessId(foreground, &pid);
+    log_debug("Foreground window=%p pid=%lu launcher=%s",
+        (void *)foreground, (unsigned long)pid,
+        foreground != NULL && foreground == wm_info.info.win.window ? "yes" : "no");
 }
 
 void set_foreground_window()
@@ -136,45 +111,49 @@ void hide_cursor(Entry *entry)
 // A function to launch an application
 bool start_process(char *cmd, bool application)
 {
-    bool ret = false;
     char file[MAX_PATH_CHARS + 1];
-    char *params = NULL;
-    int cmd_show = application ? SW_SHOWMAXIMIZED : SW_HIDE;
-    
-    // Parse command into file and parameters strings
-    parse_command(cmd, file, sizeof(file), &params);
+    const char *params = NULL;
+    if (!parse_command(cmd, file, sizeof(file), &params)) {
+        log_error("Could not parse the launch target; check path length and quoting");
+        return false;
+    }
 
-    // Set up info struct
     SHELLEXECUTEINFOA info = {
         .cbSize = sizeof(SHELLEXECUTEINFOA),
-        .fMask = SEE_MASK_NOCLOSEPROCESS,
-        .hwnd = NULL,
+        .fMask = application ? SEE_MASK_NOCLOSEPROCESS : 0,
         .lpVerb = "open",
         .lpFile = file,
         .lpParameters = params,
-        .lpDirectory = NULL,
-        .nShow = cmd_show,
-        .lpIDList = NULL,
-        .lpClass = NULL,
+        .nShow = application ? SW_SHOWMAXIMIZED : SW_HIDE,
     };
 
+    log_debug("Starting Windows shell activation for '%s' (tracked=%s)",
+        file, application ? "yes" : "no");
+    Uint32 started = SDL_GetTicks();
     BOOL successful = ShellExecuteExA(&info);
-    if (!application)
-        ret = true;
-    else {
-        // Go down in the window stack so the launched application can take focus
-        if (successful) {
-            HWND hwnd = wm_info.info.win.window;
-            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOREDRAW | SWP_NOSIZE | SWP_NOMOVE);
-            ret = true;
-        }
-        else {
-            log_debug("Failed to launch command");
-            ret = false;
-        }
+    DWORD error = successful ? ERROR_SUCCESS : GetLastError();
+    Uint32 elapsed = SDL_GetTicks() - started;
+    if (!successful) {
+        log_error("Windows shell activation failed for '%s': Win32 error %lu after %u ms",
+            file, (unsigned long)error, (unsigned)elapsed);
+        return false;
     }
-    free(params);
-    return ret;
+
+    DWORD pid = 0;
+    if (info.hProcess != NULL) {
+        pid = GetProcessId(info.hProcess);
+        CloseHandle(info.hProcess);
+    }
+    log_debug("Windows shell accepted launch in %u ms (process ID %lu; 0 means unavailable)",
+        (unsigned)elapsed, (unsigned long)pid);
+
+    // Let the launched window come forward. Shell activation may reuse an existing process.
+    if (application && wm_info.info.win.window != NULL &&
+        !SetWindowPos(wm_info.info.win.window, HWND_NOTOPMOST, 0, 0, 0, 0,
+            SWP_NOREDRAW | SWP_NOSIZE | SWP_NOMOVE)) {
+        log_debug("Could not lower launcher window: Win32 error %lu", (unsigned long)GetLastError());
+    }
+    return true;
 }
 
 // A function to scan the slideshow directory for image files
@@ -196,11 +175,25 @@ void scan_slideshow_directory(Slideshow *slideshow, const char *directory)
         handle = FindFirstFileA(file_search, &data);
         if (handle != INVALID_HANDLE_VALUE) {
             do {
+                if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                    continue;
                 join_paths(file_output, sizeof(file_output), 2, directory, data.cFileName);
-                slideshow->images = realloc(slideshow->images, (slideshow->num_images + 1) * sizeof(char*));
-                slideshow->images[slideshow->num_images] = strdup(file_output);
-                slideshow->num_images++;
+                char **images = realloc(slideshow->images, (slideshow->num_images + 1) * sizeof(char *));
+                if (images == NULL) {
+                    FindClose(handle);
+                    log_error("Could not expand the slideshow file list");
+                    return;
+                }
+                slideshow->images = images;
+                char *path = strdup(file_output);
+                if (path == NULL) {
+                    FindClose(handle);
+                    log_error("Could not copy a slideshow file path");
+                    return;
+                }
+                slideshow->images[slideshow->num_images++] = path;
             } while (FindNextFileA(handle, &data) != 0);
+            FindClose(handle);
         }
     }
 }

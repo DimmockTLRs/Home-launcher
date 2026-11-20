@@ -115,13 +115,9 @@ typedef struct {
     bool application_running;
     bool has_focus;
     bool slideshow_transition;
-    bool slideshow_background_rendering;
-    bool slideshow_background_ready;
     bool slideshow_paused;
     bool screensaver_active;
     bool screensaver_transition;
-    bool clock_rendering;
-    bool clock_ready;
 } State;
 
 // Timing information
@@ -223,6 +219,7 @@ typedef struct {
     int num_images;
     float transition_alpha;
     float transition_change_rate;
+    SDL_atomic_t decode_ready;
     SDL_Surface *transition_surface;
     SDL_Texture *transition_texture;
 } Slideshow;
@@ -313,7 +310,6 @@ typedef struct {
     Uint32 slideshow_transition_time;
 } Config;
 
-void quit_slideshow(void);
 void set_draw_color(void);
 void quit(int status);
 void print_version(FILE *stream);

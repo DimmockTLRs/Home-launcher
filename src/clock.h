@@ -27,6 +27,5 @@ typedef struct {
 void init_clock(Clock *clk);
 void get_time(Clock *clk);
 void render_clock(Clock *clk);
-int render_clock_async(void *data);
 TimeFormat get_time_format(const char *region);
 DateFormat get_date_format(const char *region);

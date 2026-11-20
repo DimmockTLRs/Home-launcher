@@ -5,7 +5,6 @@
 #include <time.h>
 #include <SDL.h>
 #include <SDL_ttf.h>
-#include <SDL_thread.h>
 #include "launcher.h"
 #include <launcher_config.h>
 #include "util.h"
@@ -21,7 +20,6 @@ static void format_date(Clock *clk);
 static void calculate_clock_positioning(Clock *clk);
 
 extern Config config;
-extern State state;
 extern Geometry geo;
 
 // A function to calculate height and x offset of text
@@ -270,16 +268,7 @@ void render_clock(Clock *clk)
         calculate_clock_geometry(clk);
     }
     calculate_clock_positioning(clk);
-    state.clock_ready = true;
 }
-
-// A functio nto render the time to image in a separate thread
-int render_clock_async(void *data)
-{
-    Clock *clk = (Clock*) data;
-    render_clock(clk);
-    return 0;
-} 
 
 // A function to get the time format for a region
 TimeFormat get_time_format(const char *region)
