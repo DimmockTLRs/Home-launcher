@@ -1,10 +1,6 @@
 name: Build
 on:
   push:
-    paths-ignore:
-      [
-        "**/**.md"
-      ]
 
   pull_request:
     branches:
@@ -16,178 +12,76 @@ on:
 
   workflow_dispatch:
 
-defaults:
-  run:
-    shell: bash
-env:
-  VCPKG_COMMITTISH: 10b7a178346f3f0abef60cecd5130e295afd8da4
-
 permissions:
-  actions: none
-  checks: none
   contents: write
-  deployments: none
-  issues: none
-  packages: read
-  pull-requests: none
-  repository-projects: none
-  security-events: none
-  statuses: read
 
 jobs:
   build_windows:
     name: Windows
     runs-on: windows-2022
-    strategy:
-      fail-fast: false
-
-    env:
-      CMAKE_BUILD_TYPE: Release
-      CMAKE_GENERATOR: Visual Studio 17 2022
-      VCPKG_TRIPLET: x64-windows-static
-
     steps:
-      - name: Checkout Git repository
-        uses: actions/checkout@v3
-        with:
-          submodules: true
+      - name: Checkout Home-launcher
+        uses: actions/checkout@v4
 
-      - uses: friendlyanon/setup-vcpkg@v1
+      - name: Checkout vcpkg
+        uses: actions/checkout@v4
         with:
-          committish: ${{env.VCPKG_COMMITTISH}}
+          repository: microsoft/vcpkg
+          # vcpkg 2026.10.16 uses the maintained getopt-win32 source.
+          ref: 9eec002df1cd109f8f104cd966a763daf9751489
+          path: vcpkg
+
+      - name: Bootstrap vcpkg
+        run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Configure
-        run: cmake -B build -G "${{env.CMAKE_GENERATOR}}" -D "CMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{env.VCPKG_TRIPLET}}
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+            -D "CMAKE_TOOLCHAIN_FILE=$env:GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -D VCPKG_TARGET_TRIPLET=x64-windows-static `
+            -D CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 
-      - name: Build
-        run: cmake --build build --target package --config ${{ env.CMAKE_BUILD_TYPE }}
+      - name: Build and package
+        run: cmake --build build --target package --config Release
+
+      - name: Verify and stage Windows package
+        id: windows_package
+        shell: pwsh
+        run: |
+          $archives = @(Get-ChildItem build -Filter '*.zip' -File)
+          if ($archives.Count -ne 1) {
+            throw "Expected one CPack ZIP, found $($archives.Count)."
+          }
+
+          Expand-Archive -LiteralPath $archives[0].FullName -DestinationPath windows-package
+          $executables = @(Get-ChildItem windows-package -Filter 'flex-launcher.exe' -File -Recurse)
+          if ($executables.Count -ne 1) {
+            throw "Expected one flex-launcher.exe, found $($executables.Count)."
+          }
+
+          $package = $executables[0].DirectoryName
+          $requiredFiles = @(
+            'config.ini',
+            'assets/fonts/OpenSans-Regular.ttf',
+            'assets/fonts/SourceSansPro-Regular.ttf',
+            'assets/icons/kodi.png'
+          )
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path -LiteralPath (Join-Path $package $file) -PathType Leaf)) {
+              throw "Windows package is missing $file."
+            }
+          }
+          "path=$package" >> $env:GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
-        name: Upload package
+        name: Upload Windows ZIP artifact
         with:
-          name: Windows build
-          path: build/*.zip
+          name: flex-launcher-windows-x64
+          path: ${{ steps.windows_package.outputs.path }}
+          if-no-files-found: error
 
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: build/*.zip
-
-  build_linux:
-    name: Linux
-    runs-on: ubuntu-latest
-    permissions:
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - name: Debian
-            docker_image: debian:bullseye
-            package_ext: .deb
-
-    container:
-      image: ${{matrix.config.docker_image}}
-
-    env:
-      CMAKE_BUILD_TYPE: Release
-
-    steps:
-      - name: Checkout Git repository
-        uses: actions/checkout@v3
-
-      - name: "Install dependencies"
-        run: |
-          if [[ "${{matrix.config.name}}" == "Debian" ]]; then
-            apt update && apt install -y build-essential git cmake pkg-config libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev libinih-dev
-          fi
-
-      - name: Build
-        run: |
-          if [[ "${{matrix.config.name}}" == "Debian" ]]; then
-            cmake -B build -DCMAKE_BUILD_TYPE=${{env.CMAKE_BUILD_TYPE}} -DCMAKE_INSTALL_PREFIX=/usr -DPACKAGE=DEB -DCPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64
-            cmake --build build --target package --config ${{env.CMAKE_BUILD_TYPE}}
-          fi
-
-      - uses: actions/upload-artifact@v4
-        name: Upload Package
-        with:
-          name: Debian build
-          path: build/*.deb
-
-      - name: Release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: build/*${{matrix.config.package_ext}}
-          token: ${{secrets.ACTIONS_SECRET}}
-
-  build_rpi:
-    name: Raspberry Pi
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-
-    env:
-      CMAKE_BUILD_TYPE: Release
-      IMAGE_VERSION: "2022-10-30"
-
-    steps:
-      - name: Setup
-        run: |
-          REPO=${{github.repository}}
-          echo "REPO_TITLE=${REPO#*/}" >> ${GITHUB_ENV}
-          sudo apt update && sudo apt-get install -y qemu-system-aarch64 qemu-user-static binfmt-support wget tar
-          mkdir root
-
-      - name: Cache Image
-        id: image-cache
-        uses: actions/cache@v3
-        with:
-          path: image.tar.xz
-          key: ${{env.IMAGE_VERSION}}
-
-      - name: Download Image
-        if: steps.image-cache.outputs.cache-hit != 'true'   
-        run: wget -q https://github.com/complexlogic/rpi_image/releases/download/${{env.IMAGE_VERSION}}/image.tar.xz
-
-      - name: Extract Image
-        run: tar -xf image.tar.xz
-
-      - name: Checkout Git repository
-        uses: actions/checkout@v3
-        with:
-          path: ${{env.REPO_TITLE}}
-
-      - name: Generate Build Script
-        run: |
-          echo '#!/bin/bash' >> rpi
-          echo "sudo apt update &&" >> rpi
-          echo "sudo apt install -y libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev libinih-dev &&" >> rpi
-          echo "cd ${{env.REPO_TITLE}} &&" >> rpi
-          echo "cmake -B build -DCMAKE_BUILD_TYPE=${{env.CMAKE_BUILD_TYPE}} -DCMAKE_INSTALL_PREFIX=/usr -DPACKAGE=DEB -DCPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64 -DRPI=1 &&" >> rpi
-          echo "cmake --build build --target package --config ${{env.CMAKE_BUILD_TYPE}}" >> rpi
-          sudo chmod +x rpi
-
-      - name: Build
-        run: |
-          LOOPBACK=$(sudo losetup -f -P --show rpi.img)
-          sudo mount ${LOOPBACK}p2 -o rw root
-          sudo cp /usr/bin/qemu-aarch64-static root/usr/bin
-          sudo cp -r ${{env.REPO_TITLE}} root
-          sudo cp rpi root/usr/bin
-          sudo chroot root rpi
-
-      - uses: actions/upload-artifact@v4
-        name: Upload package
-        with:
-          name: Raspberry Pi build
-          path: root/${{env.REPO_TITLE}}/build/*.deb
-
-      - name: Release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: root/${{env.REPO_TITLE}}/build/*.deb
-          token: ${{secrets.ACTIONS_SECRET}}
