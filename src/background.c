@@ -22,6 +22,8 @@ static struct {
     int collage_cursor;
     int last_collage[MAX_COLLAGE_PANELS];
     int last_collage_size;
+    int prepared_collage[MAX_COLLAGE_PANELS];
+    int prepared_collage_size;
     int auto_panels;
     int width;
     int height;
@@ -323,10 +325,8 @@ static SDL_Surface *next_collage(void)
                 return NULL;
             }
 
-            SDL_memcpy(background.last_collage, selected, (size_t)filled * sizeof(*selected));
-            background.last_collage_size = filled;
-            int max_panels = SDL_min(MAX_COLLAGE_PANELS, background.remaining_photos);
-            background.auto_panels = filled < max_panels ? filled + 1 : 2;
+            SDL_memcpy(background.prepared_collage, selected, (size_t)filled * sizeof(*selected));
+            background.prepared_collage_size = filled;
             return frame;
         }
 
@@ -426,6 +426,8 @@ void update_background(SDL_Renderer *renderer, Uint32 now, bool paused)
     background.worker = NULL;
     SDL_Texture *frame = background.prepared != NULL ?
         SDL_CreateTextureFromSurface(renderer, background.prepared) : NULL;
+    if (background.prepared != NULL && frame == NULL)
+        log_error("Could not upload photo background: %s", SDL_GetError());
     SDL_FreeSurface(background.prepared);
     background.prepared = NULL;
 
@@ -444,6 +446,16 @@ void update_background(SDL_Renderer *renderer, Uint32 now, bool paused)
             background.finished = !have_another_background();
         }
         return;
+    }
+
+    // Only advance the layout and recent photo set after a successful texture upload.
+    if (config.background_mode == BACKGROUND_COLLAGE) {
+        int count = background.prepared_collage_size;
+        SDL_memcpy(background.last_collage, background.prepared_collage,
+            (size_t)count * sizeof(*background.last_collage));
+        background.last_collage_size = count;
+        int max_panels = SDL_min(MAX_COLLAGE_PANELS, background.remaining_photos);
+        background.auto_panels = count < max_panels ? count + 1 : 2;
     }
 
     if (background.current != NULL && config.slideshow_transition_time > 0) {
