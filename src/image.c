@@ -37,33 +37,6 @@ void quit_svg()
     nsvgDeleteRasterizer(rasterizer);
 }
 
-// Decode a different image, keeping the current slide if all alternatives fail.
-SDL_Surface *load_next_slideshow_background(Slideshow *slideshow)
-{
-    int index = slideshow->i;
-    for (int attempt = 0; attempt < slideshow->num_images; attempt++) {
-        index = (index + 1) % slideshow->num_images;
-        if (index == slideshow->i)
-            break;
-
-        SDL_Surface *surface = IMG_Load(slideshow->images[slideshow->order[index]]);
-        if (surface != NULL) {
-            slideshow->i = index;
-            return surface;
-        }
-    }
-    return NULL;
-}
-
-// The main thread joins the worker before reading its result or freeing the slideshow.
-int load_next_slideshow_background_async(void *data)
-{
-    Slideshow *slideshow = data;
-    slideshow->transition_surface = load_next_slideshow_background(slideshow);
-    SDL_AtomicSet(&slideshow->decode_ready, 1);
-    return 0;
-}
-
 // A function to load a texture from a file
 SDL_Texture *load_texture_from_file(const char *path)
 {

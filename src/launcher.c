@@ -7,10 +7,10 @@
 #include <SDL_syswm.h>
 #include <SDL_image.h>
 #include <SDL_ttf.h>
-#include <SDL_thread.h>
 #include "launcher.h"
 #include <launcher_config.h>
 #include "image.h"
+#include "background.h"
 #include "util.h"
 #include "debug.h"
 #include "clock.h"
@@ -22,12 +22,8 @@ static void create_window(void);
 static void init_sdl_ttf(void);
 static int load_menu(Menu *menu, bool set_back_menu, bool reset_position);
 static int load_menu_by_name(const char *menu_name, bool set_back_menu, bool reset_position);
-static void update_slideshow(void);
-static void resume_slideshow(void);
 static void update_screensaver(void);
 static void update_clock(void);
-static void init_slideshow(void);
-static void quit_slideshow(void);
 static void init_screensaver(void);
 static void calculate_button_geometry(Entry *entry, int buttons);
 static void render_buttons(Menu *menu);
@@ -66,6 +62,9 @@ Config config = {
     .title_shadow_color.b             = DEFAULT_TITLE_SHADOW_COLOR_B,
     .title_shadow_color.a             = DEFAULT_TITLE_SHADOW_COLOR_A,
     .background_mode                  = BACKGROUND_COLOR,
+    .photo_fit                        = PHOTO_CONTAIN,
+    .photo_crop_x                     = 50,
+    .photo_crop_y                     = 50,
     .background_color.r               = DEFAULT_BACKGROUND_COLOR_R,
     .background_color.g               = DEFAULT_BACKGROUND_COLOR_G,
     .background_color.b               = DEFAULT_BACKGROUND_COLOR_B,
@@ -162,21 +161,18 @@ State state = { false };
 // Global variables
 SDL_Window *window                    = NULL;
 SDL_Renderer *renderer                = NULL;
-SDL_Texture *background_texture       = NULL;
 SDL_Texture *background_overlay       = NULL;
 Menu *default_menu                    = NULL;
 Menu *current_menu                    = NULL;
 Entry *current_entry                  = NULL;
 Highlight *highlight                  = NULL;
 Scroll *scroll                        = NULL;
-Slideshow *slideshow                  = NULL;
 Screensaver *screensaver              = NULL;
 FILE *log_file                        = NULL;
 Gamepad *gamepads                     = NULL;
 GamepadControl *gamepad_controls      = NULL;
 Hotkey *hotkeys                       = NULL;
 Clock *clk                            = NULL;
-static SDL_Thread *slideshow_thread    = NULL;
 SDL_Event event;
 SDL_SysWMinfo wm_info;
 SDL_DisplayMode display_mode;
@@ -249,9 +245,6 @@ static void create_window()
         if (!repeat_period)
             repeat_period = 1;
     }
-    if (slideshow != NULL && config.slideshow_transition_time > 0)
-        slideshow->transition_change_rate = 255.0f / ((float) config.slideshow_transition_time / (float) refresh_period);
-
     renderer = SDL_CreateRenderer(window, -1, renderer_flags);
     if (renderer == NULL)
         log_fatal("Could not initialize renderer\n%s", SDL_GetError());
@@ -281,20 +274,13 @@ static void init_sdl_image()
 void set_draw_color()
 {
     SDL_Color *color = NULL;
-    if (config.background_mode == BACKGROUND_COLOR)
-        color = &config.background_color;
-    else if (config.background_mode == BACKGROUND_TRANSPARENT)
+    if (config.background_mode == BACKGROUND_TRANSPARENT)
         color = &config.chroma_key_color;
 
-    if (color == NULL)
-        SDL_SetRenderDrawColor(renderer, 0xFF, 0xFF, 0xFF, 0xFF);
     else
-        SDL_SetRenderDrawColor(renderer,
-            color->r,
-            color->g,
-            color->b,
-            color->a
-        );
+        color = &config.background_color;
+
+    SDL_SetRenderDrawColor(renderer, color->r, color->g, color->b, color->a);
 }
 
 // A function to initialize SDL's TTF subsystem
@@ -327,7 +313,7 @@ static void init_sdl_ttf()
 // A function to close subsystems and free memory before quitting
 static void cleanup()
 {
-    quit_slideshow();
+    quit_background();
     if (gamepads != NULL)
         disconnect_gamepad(-1, true, true);
     if (title_info.font != NULL)
@@ -448,89 +434,6 @@ static void handle_keypress(SDL_Keysym *key)
     }
 }
 
-// A function to quit the slideshow mode in case of error or program exit
-static void quit_slideshow(void)
-{
-    if (slideshow == NULL)
-        return;
-    if (slideshow_thread != NULL) {
-        SDL_WaitThread(slideshow_thread, NULL);
-        slideshow_thread = NULL;
-    }
-    SDL_FreeSurface(slideshow->transition_surface);
-    if (slideshow->transition_texture != NULL)
-        SDL_DestroyTexture(slideshow->transition_texture);
-    state.slideshow_transition = false;
-
-    // Free allocated image paths
-    for (int i = 0; i < slideshow->num_images; i++)
-        free(slideshow->images[i]);
-    free(slideshow->images);
-    free(slideshow->order);
-    free(slideshow);
-    slideshow = NULL;
-}
-
-// A function to initialize the slideshow background mode
-static void init_slideshow()
-{
-    if (config.slideshow_directory == NULL || !directory_exists(config.slideshow_directory)) {
-        log_error("Slideshow directory '%s' does not exist, "
-            "Switching to color background mode",
-            config.slideshow_directory != NULL ? config.slideshow_directory : "(unset)"
-        );
-        config.background_mode = BACKGROUND_COLOR;
-        return;
-    }
-    // Allocate and initialize slideshow struct
-    slideshow = malloc(sizeof(Slideshow));
-    if (slideshow == NULL)
-        log_fatal("Could not allocate slideshow state");
-    *slideshow = (Slideshow) {
-        .i = -1,
-        .num_images = 0,
-        .transition_surface = NULL,
-        .transition_texture = NULL,
-        .transition_alpha = 0.f,
-        .transition_change_rate = 0.f,
-        .images = NULL,
-        .order = NULL
-    };
-
-    // Find background images from directory
-    scan_slideshow_directory(slideshow, config.slideshow_directory);
-    
-    // Handle errors
-    if (!slideshow->num_images) {
-        log_error("No images found in slideshow directory '%s', "
-            "Changing background mode to color", 
-            config.slideshow_directory
-        );
-        config.background_mode = BACKGROUND_COLOR;
-        quit_slideshow();
-    } 
-    else if (slideshow->num_images == 1) {
-        log_error("Only one image found in slideshow directory %s"
-            "Changing background mode to single image", 
-            config.slideshow_directory
-        );
-        free(config.background_image);
-        config.background_image = strdup(slideshow->images[0]);
-        config.background_mode = BACKGROUND_IMAGE;
-        quit_slideshow();
-    }
-
-    // Generate array of random numbers for image order, load first image
-    else {
-        slideshow->order = malloc(sizeof(int) * (size_t) slideshow->num_images);
-        if (slideshow->order == NULL)
-            log_fatal("Could not allocate slideshow order");
-        random_array(slideshow->order, slideshow->num_images);
-        if (config.debug)
-            debug_slideshow(slideshow);
-    }
-}
-
 // A function to initialize the screensaver feature
 static void init_screensaver()
 {
@@ -574,12 +477,6 @@ static void init_screensaver()
     screensaver->texture = load_texture(surface);
     screensaver->alpha = 0.0f;
     SDL_SetTextureAlphaMod(screensaver->texture, 0.0f);
-}
-
-// A function to resume the slideshow after a launched application returns
-static void resume_slideshow()
-{
-    ticks.slideshow_load = ticks.main;
 }
 
 // A function to load a menu
@@ -777,11 +674,7 @@ static void draw_screen()
     // Draw background
     SDL_RenderClear(renderer);
     if (!(state.application_launching && config.on_launch == ON_LAUNCH_BLANK)) {
-        if (config.background_mode == BACKGROUND_IMAGE || config.background_mode == BACKGROUND_SLIDESHOW)
-            SDL_RenderCopy(renderer, background_texture, NULL, NULL);
-
-        if (config.background_mode == BACKGROUND_SLIDESHOW && state.slideshow_transition)
-            SDL_RenderCopy(renderer, slideshow->transition_texture, NULL, NULL);
+        draw_background(renderer);
 
         // Draw background overlay
         if (config.background_overlay)
@@ -1055,65 +948,6 @@ static void poll_gamepad()
     }
 }
 
-// A function to update the slideshow
-static void update_slideshow()
-{
-    if (!state.slideshow_transition && !state.slideshow_paused &&
-        ticks.main - ticks.slideshow_load > config.slideshow_image_duration) {
-        if (slideshow_thread == NULL) {
-            SDL_AtomicSet(&slideshow->decode_ready, 0);
-            slideshow_thread = SDL_CreateThread(load_next_slideshow_background_async,
-                "Slideshow Thread", slideshow);
-            if (slideshow_thread == NULL) {
-                log_error("Could not start slideshow worker: %s", SDL_GetError());
-                ticks.slideshow_load = ticks.main;
-            }
-        }
-        else if (SDL_AtomicGet(&slideshow->decode_ready)) {
-            SDL_WaitThread(slideshow_thread, NULL);
-            slideshow_thread = NULL;
-            SDL_Texture *texture = load_texture(slideshow->transition_surface);
-            slideshow->transition_surface = NULL;
-
-            if (texture == NULL) {
-                log_debug("Slideshow kept the current image: no replacement texture available");
-                ticks.slideshow_load = ticks.main;
-            }
-            else if (config.slideshow_transition_time > 0) {
-                log_debug("Starting slideshow crossfade to image %i of %i",
-                    slideshow->i + 1, slideshow->num_images);
-                SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-                SDL_SetTextureAlphaMod(texture, 0);
-                slideshow->transition_texture = texture;
-                state.slideshow_transition = true;
-            }
-            else {
-                SDL_DestroyTexture(background_texture);
-                background_texture = texture;
-                ticks.slideshow_load = ticks.main;
-            }
-        }
-    }
-    else if (state.slideshow_transition) {
-        
-        // Increase the transparency
-        slideshow->transition_alpha += slideshow->transition_change_rate;
-        
-        // If transition is done, destroy old background and replace it with the new one
-        if (slideshow->transition_alpha >= 255.0f) {
-            SDL_SetTextureAlphaMod(slideshow->transition_texture, 0xFF);
-            slideshow->transition_alpha = 0.0f;
-            SDL_DestroyTexture(background_texture);
-            background_texture = slideshow->transition_texture;
-            slideshow->transition_texture = NULL;
-            state.slideshow_transition = false;
-            ticks.slideshow_load = ticks.main;
-        }
-        else
-            SDL_SetTextureAlphaMod(slideshow->transition_texture, (Uint8) slideshow->transition_alpha);
-    }
-}
-
 // A function to update the screensaver
 static void update_screensaver()
 {
@@ -1148,7 +982,7 @@ static void update_screensaver()
                 
                 // Reset the slideshow time so we don't have a transition immediately 
                 // after coming out of screensaver mode
-                ticks.slideshow_load = ticks.main;
+                restart_background_interval(ticks.main);
             }
         }
     }
@@ -1211,7 +1045,7 @@ static inline void post_launch()
     if (config.clock_enabled)
         update_clock();
     if (config.background_mode == BACKGROUND_SLIDESHOW)
-        resume_slideshow();
+        restart_background_interval(ticks.main);
     if (config.on_launch == ON_LAUNCH_BLANK)
         set_draw_color();
 
@@ -1281,10 +1115,6 @@ int main(int argc, char *argv[])
     init_sdl_ttf();
     validate_settings(&geo);
     
-    // Initialize slideshow
-    if (config.background_mode == BACKGROUND_SLIDESHOW)
-        init_slideshow();
-
     // Initialize Nanosvg, create window and renderer
     init_svg();
     create_window();
@@ -1305,31 +1135,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Render background
-    if (config.background_mode == BACKGROUND_IMAGE) {
-        if (config.background_image == NULL)
-            log_error("Background 'Image' setting not specified in config file");
-        else
-            background_texture = load_texture_from_file(config.background_image);
-
-        // Switch to color mode if loading background image failed
-        if (background_texture == NULL) {
-            config.background_mode = BACKGROUND_COLOR;
-            log_error("Couldn't load background image, defaulting to color background");
-            set_draw_color();
-        }
-    }
-
-    // Render first slideshow image
-    else if (config.background_mode == BACKGROUND_SLIDESHOW) {
-        background_texture = load_texture(load_next_slideshow_background(slideshow));
-        if (background_texture == NULL) {
-            log_error("Could not load a slideshow background from '%s'", config.slideshow_directory);
-            quit_slideshow();
-            config.background_mode = BACKGROUND_COLOR;
-            set_draw_color();
-        }
-    }
+    init_background(renderer);
 
     // Initialize screensaver
     if (config.screensaver_enabled)
@@ -1498,8 +1304,9 @@ int main(int argc, char *argv[])
         if (!(state.application_running || state.application_launching)) {
             if (gamepads != NULL)
                 poll_gamepad();
-            if (config.background_mode == BACKGROUND_SLIDESHOW)
-                update_slideshow();
+            if (config.background_mode == BACKGROUND_IMAGE ||
+                config.background_mode == BACKGROUND_SLIDESHOW)
+                update_background(renderer, ticks.main, state.slideshow_paused);
             if (config.screensaver_enabled)
                 update_screensaver();
             if (config.clock_enabled)

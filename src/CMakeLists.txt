@@ -2,6 +2,8 @@
 set(SOURCES
   launcher.c
   launcher.h
+  background.c
+  background.h
   util.c
   util.h
   image.c

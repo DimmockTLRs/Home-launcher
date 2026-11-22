@@ -116,6 +116,9 @@ void debug_settings()
     DEBUG_MODE(SETTING_BACKGROUND_MODE, MODE_SETTING_BACKGROUND, config.background_mode);
     DEBUG_COLOR(SETTING_BACKGROUND_COLOR, config.background_color);
     DEBUG_STR(SETTING_BACKGROUND_IMAGE, config.background_image);
+    DEBUG_MODE(SETTING_PHOTO_FIT, MODE_SETTING_PHOTO_FIT, config.photo_fit);
+    DEBUG_INT(SETTING_PHOTO_CROP_X, config.photo_crop_x);
+    DEBUG_INT(SETTING_PHOTO_CROP_Y, config.photo_crop_y);
     DEBUG_STR(SETTING_SLIDESHOW_DIRECTORY, config.slideshow_directory);
     DEBUG_INT(SETTING_SLIDESHOW_IMAGE_DURATION, config.slideshow_image_duration / 1000);
     DEBUG_FLOAT(SETTING_SLIDESHOW_TRANSITION_TIME, ((float) config.slideshow_transition_time) / 1000.0f);
@@ -235,18 +238,6 @@ void debug_hotkeys(Hotkey *hotkeys)
         index++;
     }
     log_debug("");
-}
-
-// A function to debug the parsed slideshow files
-void debug_slideshow(Slideshow *slideshow)
-{
-    log_debug("======================== Slideshow ========================");
-    log_debug("Found %i images in directory %s:", 
-      slideshow->num_images, 
-      config.slideshow_directory
-    );
-    for (int i = 0; i < slideshow->num_images; i++)
-        log_debug("  %s", slideshow->images[slideshow->order[i]]);
 }
 
 // A function to debug the video settings

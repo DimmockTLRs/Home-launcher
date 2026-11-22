@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <windows.h>
+#include <wchar.h>
 #include <SDL.h>
 #include <SDL_syswm.h>
 #include "../launcher.h"
@@ -26,20 +27,6 @@ UINT exit_hotkey                = 0;
 bool file_exists(const char *path)
 {
     return _access(path, 4) ? false : true;
-}
-
-// A function to determine if a directory exists on the filesystem
-bool directory_exists(const char *path)
-{
-    if (!file_exists(path))
-        return false;
-    else {
-        DWORD attributes = GetFileAttributesA(path);
-        if (attributes & FILE_ATTRIBUTE_DIRECTORY)
-            return true;
-        else
-            return false;
-    }
 }
 
 // A function that parses the command string into a file and parameters
@@ -156,46 +143,50 @@ bool start_process(char *cmd, bool application)
     return true;
 }
 
-// A function to scan the slideshow directory for image files
-void scan_slideshow_directory(Slideshow *slideshow, const char *directory)
+// Enumerate UTF-8 folder paths using Windows' Unicode filesystem API.
+bool scan_slideshow_directory(PhotoList *files, const char *directory, SDL_atomic_t *cancel)
 {
-    WIN32_FIND_DATAA data;
-    HANDLE handle;
-    char file_search[MAX_PATH_CHARS + 1];
-    char file_output[MAX_PATH_CHARS + 1];
-    char extension[10];
+    size_t length = strlen(directory);
+    size_t size = length + 3;
+    char *pattern = malloc(size);
+    if (pattern == NULL)
+        return false;
+    const char *separator = length && (directory[length - 1] == '\\' ||
+        directory[length - 1] == '/') ? "" : "\\";
+    SDL_snprintf(pattern, size, "%s%s*", directory, separator);
+    wchar_t *wide_pattern = (wchar_t *)SDL_iconv_string("UTF-16LE", "UTF-8", pattern, strlen(pattern) + 1);
+    free(pattern);
+    if (wide_pattern == NULL)
+        return false;
 
-    // Generate a wildcard file search string for all supported image file extensions
-    for (int i = 0; i < NUM_IMAGE_EXTENSIONS; i++) {
-        copy_string(extension, "*", sizeof(extension));
-        strcat(extension, extensions[i]);
-        join_paths(file_search, sizeof(file_search), 2, directory, extension);
+    WIN32_FIND_DATAW entry;
+    HANDLE search = FindFirstFileW(wide_pattern, &entry);
+    DWORD error = search == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    SDL_free(wide_pattern);
+    if (search == INVALID_HANDLE_VALUE)
+        return error == ERROR_FILE_NOT_FOUND;
 
-        // Store every result into the slideshow struct
-        handle = FindFirstFileA(file_search, &data);
-        if (handle != INVALID_HANDLE_VALUE) {
-            do {
-                if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-                    continue;
-                join_paths(file_output, sizeof(file_output), 2, directory, data.cFileName);
-                char **images = realloc(slideshow->images, (slideshow->num_images + 1) * sizeof(char *));
-                if (images == NULL) {
-                    FindClose(handle);
-                    log_error("Could not expand the slideshow file list");
-                    return;
-                }
-                slideshow->images = images;
-                char *path = strdup(file_output);
-                if (path == NULL) {
-                    FindClose(handle);
-                    log_error("Could not copy a slideshow file path");
-                    return;
-                }
-                slideshow->images[slideshow->num_images++] = path;
-            } while (FindNextFileA(handle, &data) != 0);
-            FindClose(handle);
+    bool success = true;
+    while (!SDL_AtomicGet(cancel)) {
+        if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            size_t bytes = (wcslen(entry.cFileName) + 1) * sizeof(wchar_t);
+            char *name = SDL_iconv_string("UTF-8", "UTF-16LE", (const char *)entry.cFileName, bytes);
+            if (name == NULL) {
+                success = false;
+                break;
+            }
+            success = !is_photo_filename(name) || append_photo_path(files, directory, name);
+            SDL_free(name);
+            if (!success)
+                break;
+        }
+        if (!FindNextFileW(search, &entry)) {
+            success = GetLastError() == ERROR_NO_MORE_FILES;
+            break;
         }
     }
+    FindClose(search);
+    return success;
 }
 
 // A function to get the 2 letter region code

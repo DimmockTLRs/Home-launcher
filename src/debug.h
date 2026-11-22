@@ -11,7 +11,6 @@ void debug_settings(void);
 void debug_gamepad(GamepadControl *gamepad_controls);
 void debug_hotkeys(Hotkey *hotkeys);
 void debug_menu_entries(Menu *first_menu, size_t num_menus);
-void debug_slideshow(Slideshow *slideshow);
 void debug_button_positions(Entry *entry, Menu *current_menu, Geometry *geo);
 
 #ifdef _WIN32

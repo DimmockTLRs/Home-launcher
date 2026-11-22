@@ -59,7 +59,8 @@ typedef enum {
     MODE_SETTING_OVERSIZE,
     MODE_SETTING_ALIGNMENT,
     MODE_SETTING_TIME_FORMAT,
-    MODE_SETTING_DATE_FORMAT
+    MODE_SETTING_DATE_FORMAT,
+    MODE_SETTING_PHOTO_FIT
 } ModeSettingType;
 
 typedef enum {
@@ -68,6 +69,12 @@ typedef enum {
     BACKGROUND_SLIDESHOW,
     BACKGROUND_TRANSPARENT
 } ModeBackground;
+
+typedef enum {
+    PHOTO_CONTAIN,
+    PHOTO_COVER,
+    PHOTO_STRETCH
+} PhotoFit;
 
 typedef enum {
     ON_LAUNCH_BLANK,
@@ -114,7 +121,6 @@ typedef struct {
     bool application_launching;
     bool application_running;
     bool has_focus;
-    bool slideshow_transition;
     bool slideshow_paused;
     bool screensaver_active;
     bool screensaver_transition;
@@ -125,7 +131,6 @@ typedef struct {
     Uint32 main;
     Uint32 program_start;
     Uint32 application_launched;
-    Uint32 slideshow_load;
     Uint32 last_input;
     Uint32 clock_update;
     Uint32 application_exited;
@@ -211,18 +216,12 @@ typedef struct {
     SDL_Rect rect_left;
 } Scroll;
 
-// Slideshow
+// File paths discovered in the slideshow directory.
 typedef struct {
-    char **images;
-    int *order;
-    int i;
-    int num_images;
-    float transition_alpha;
-    float transition_change_rate;
-    SDL_atomic_t decode_ready;
-    SDL_Surface *transition_surface;
-    SDL_Texture *transition_texture;
-} Slideshow;
+    char **paths;
+    int count;
+    int capacity;
+} PhotoList;
 
 // Screensaver
 typedef struct {
@@ -242,6 +241,9 @@ typedef struct {
     ModeBackground background_mode; // Defines image or color background mode
     SDL_Color background_color; // Background color
     SDL_Color chroma_key_color;
+    PhotoFit photo_fit;
+    int photo_crop_x;
+    int photo_crop_y;
     char *background_image; // Path to background image
     char *slideshow_directory;
     bool background_overlay;

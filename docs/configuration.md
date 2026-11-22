@@ -117,6 +117,8 @@ The settings in this section control what Flex Launcher will display in the back
 - [Mode](#mode)
 - [Color](#color)
 - [Image](#image)
+- [Fit](#fit)
+- [CropX and CropY](#cropx-and-cropy)
 - [SlideshowDirectory](#slideshowdirectory)
 - [SlideshowImageDuration](#slideshowimageduration)
 - [SlideshowTransitionTime](#slideshowtransitiontime)
@@ -126,7 +128,7 @@ The settings in this section control what Flex Launcher will display in the back
 - [OverlayOpacity](#overlayopacity)
 
 ##### Mode
-Defines what mode the background will be. Possible values: "Color", "Image", and "Slideshow"
+Defines what mode the background will be. Possible values are "Color", "Image", "Slideshow", and "Transparent".
 - Color: The background will be a solid color.
 - Image: The background will be an image.
 - Slideshow: The background will be a series of images displayed in random order, with a fading transition between each image.
@@ -135,15 +137,33 @@ Defines what mode the background will be. Possible values: "Color", "Image", and
 Default: Color
 
 ##### Color
-When `Mode` is set to "Color", this setting defines the color of the background.
+Sets the solid background color. Photo modes also use this color behind transparent pixels, around contained photos, and while waiting for the first photo.
 
 Default: #000000 (Black)
 
 ##### Image
-When `Mode` is set to "Image", this setting defines the image to be displayed in the background. The value should be a path to an image file. If the image is not the same resolution as your desktop, it will be stretched accordingly.
+When `Mode` is set to "Image", this setting defines the image to be displayed in the background. Set this to the path to an image file.
+
+##### Fit
+
+Controls how photos fill the display in both Image and Slideshow modes.
+
+- `Contain` shows the whole photo at its original aspect ratio, with `Color` filling any unused space.
+- `Cover` fills the screen at the photo's original aspect ratio, cropping the edges as needed.
+- `Stretch` fills the screen using the previous stretching behaviour.
+
+Default: Contain
+
+##### CropX and CropY
+
+These settings apply to `Cover` and take whole percentages from `0%` to `100%`. `CropX` places a horizontal crop at the left, centre, or right at `0%`, `50%`, or `100%`. `CropY` does the same vertically from top to bottom. Only the axis that needs cropping is used.
+
+Default: 50% on both axes
 
 ##### SlideshowDirectory
-When `Mode` is set to "Slideshow", this setting defines the directory (folder) which contains the images to display in the background. The value should be a path to a directory on your filesystem. The number of images that may be scanned from the directory is limited to 250.
+When `Mode` is set to "Slideshow", this setting defines the directory (folder) which contains the images to display in the background. Set this to the path to a folder containing JPEG, PNG, or WebP files. Put the files directly in that folder. The launcher indexes their paths once per run and skips photos it cannot decode. It keeps the last usable image if the next photo cannot be prepared.
+
+Indexing and photo preparation run in the background. The launcher keeps the current frame and at most one prepared replacement. Background frames are limited to 3840 × 2160 (or 2160 × 3840 for portrait displays). Decoding very large originals can still temporarily use more memory than the prepared frames.
 
 ##### SlideshowImageDuration
 When `Mode` is set to "Slideshow", this setting defines the amount of time in seconds to display each image. Must be an integer value.
@@ -151,7 +171,7 @@ When `Mode` is set to "Slideshow", this setting defines the amount of time in se
 Default: 30
 
 ##### SlideshowTransitionTime
-When `Mode` is set to "Slideshow", this setting defines the amount of time in seconds that the next background image will fade in. The fading transition may be disabled by setting this to 0, which will yield a "hard" transition between images. Decimal values are acceptable.
+When `Mode` is set to "Slideshow", this setting defines the amount of time in seconds that the next background image will fade in. The fade uses elapsed time. Set this to 0 for an instant cut between images. Decimal values are acceptable.
 
 Default: 3
 

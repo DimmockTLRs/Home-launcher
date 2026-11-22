@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -18,7 +19,6 @@
 static int desktop_handler(void *user, const char *section, const char *name, const char *value);
 static void strip_field_codes(char *cmd);
 static bool ends_with(const char *string, const char *phrase);
-static int image_filter(const struct dirent *file);
 
 // A function to handle .desktop lines
 static int desktop_handler(void *user, const char *section, const char *name, const char *value)
@@ -33,13 +33,6 @@ static int desktop_handler(void *user, const char *section, const char *name, co
 bool file_exists(const char *path)
 {
     return access(path, R_OK) ? false : true;
-}
-
-// A function to determine if a directory exists in the filesystem
-bool directory_exists(const char *path)
-{
-    struct stat directory;
-    return stat(path, &directory) == 0 && S_ISDIR(directory.st_mode) ? true : false;
 }
 
 // A function to remove field codes from .desktop file Exec line
@@ -167,46 +160,37 @@ bool start_process(char *cmd, bool application)
     return true;
 }
 
-// A function to determine if a file is an image file
-int image_filter(const struct dirent *file)
+// Index photo paths in a single pass, with no image decoding during enumeration.
+bool scan_slideshow_directory(PhotoList *files, const char *directory, SDL_atomic_t *cancel)
 {
-    size_t len_file = strlen(file->d_name);
-    size_t len_extension;
-    for (size_t i = 0; i < NUM_IMAGE_EXTENSIONS; i++) {
-        len_extension = strlen(extensions[i]);
-        if (len_file > len_extension && 
-        !strcmp(file->d_name + len_file - len_extension, extensions[i]))
-            return 1;
-    }
-    return 0;
-}
+    DIR *folder = opendir(directory);
+    if (folder == NULL)
+        return false;
 
-// A function to scan a directory for images
-void scan_slideshow_directory(Slideshow *slideshow, const char *directory)
-{
-    struct dirent **files;
-    int count = scandir(directory, &files, image_filter, NULL);
-    if (count < 0) {
-        log_error("Could not scan slideshow directory '%s'", directory);
-        return;
-    }
-    if (count == 0) {
-        free(files);
-        return;
-    }
-
-    slideshow->images = malloc((size_t) count * sizeof(char *));
-    char file_path[MAX_PATH_CHARS + 1];
-    for (int i = 0; i < count; i++) {
-        if (slideshow->images != NULL) {
-            join_paths(file_path, sizeof(file_path), 2, directory, files[i]->d_name);
-            char *path = strdup(file_path);
-            if (path != NULL)
-                slideshow->images[slideshow->num_images++] = path;
+    bool success = true;
+    while (!SDL_AtomicGet(cancel)) {
+        errno = 0;
+        struct dirent *entry = readdir(folder);
+        if (entry == NULL) {
+            success = errno == 0;
+            break;
         }
-        free(files[i]);
+        if (!is_photo_filename(entry->d_name))
+            continue;
+        if (entry->d_type != DT_REG) {
+            struct stat attributes;
+            if ((entry->d_type != DT_UNKNOWN && entry->d_type != DT_LNK) ||
+                fstatat(dirfd(folder), entry->d_name, &attributes, 0) != 0 ||
+                !S_ISREG(attributes.st_mode))
+                continue;
+        }
+        if (!append_photo_path(files, directory, entry->d_name)) {
+            success = false;
+            break;
+        }
     }
-    free(files);
+    closedir(folder);
+    return success;
 }
 
 void get_region(char *buffer)

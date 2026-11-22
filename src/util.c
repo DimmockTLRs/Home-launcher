@@ -30,7 +30,8 @@ static const char *mode_settings[][5] = {
     {"Truncated", "Shrink", "None", NULL, NULL},          // OversizeMode
     {"Left", "Right", NULL, NULL, NULL},                  // Clock Alignment
     {"24hr", "12hr", "Auto", NULL, NULL},                 // Clock Format
-    {"Big", "Little", "Auto", NULL, NULL}                 // Date Format
+    {"Big", "Little", "Auto", NULL, NULL},                // Date Format
+    {"Contain", "Cover", "Stretch", NULL, NULL}          // Photo Fit
 };
 
 // A function to handle the arguments from the command line
@@ -125,6 +126,14 @@ void parse_config_file(const char *config_file_path)
 }
 
 // A function to handle config file parsing
+static void parse_crop_position(const char *value, int *position)
+{
+    char *suffix;
+    long percent = strtol(value, &suffix, 10);
+    if (suffix != value && strcmp(suffix, "%") == 0 && percent >= 0 && percent <= 100)
+        *position = (int)percent;
+}
+
 int config_handler(void *user, const char *section, const char *name, const char *value)
 {
     UNUSED(user);
@@ -193,6 +202,12 @@ int config_handler(void *user, const char *section, const char *name, const char
             parse_mode_setting(MODE_SETTING_BACKGROUND, value, (int*) &config.background_mode);
         else if (MATCH(name, SETTING_BACKGROUND_COLOR))
             hex_to_color(value, &config.background_color);
+        else if (MATCH(name, SETTING_PHOTO_FIT))
+            parse_mode_setting(MODE_SETTING_PHOTO_FIT, value, (int*) &config.photo_fit);
+        else if (MATCH(name, SETTING_PHOTO_CROP_X))
+            parse_crop_position(value, &config.photo_crop_x);
+        else if (MATCH(name, SETTING_PHOTO_CROP_Y))
+            parse_crop_position(value, &config.photo_crop_y);
         else if (MATCH(name, SETTING_BACKGROUND_IMAGE)) {
             config.background_image = strdup(value);
             clean_path(config.background_image);

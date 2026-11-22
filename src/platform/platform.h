@@ -6,9 +6,8 @@
 
 // Abstracted platform function prototypes
 bool file_exists(const char *path);
-bool directory_exists(const char *path);
 void get_region(char *buffer);
-void scan_slideshow_directory(Slideshow *slideshow, const char *directory);
+bool scan_slideshow_directory(PhotoList *files, const char *directory, SDL_atomic_t *cancel);
 bool start_process(char *cmd, bool application);
 void scmd_shutdown(void);
 void scmd_restart(void);
