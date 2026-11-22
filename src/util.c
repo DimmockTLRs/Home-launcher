@@ -24,14 +24,15 @@ extern Hotkey          *hotkeys;
 Menu                   *menu  = NULL;
 Entry                  *entry = NULL;
 
-static const char *mode_settings[][5] = {
-    {"Color", "Image", "Slideshow", "Transparent", NULL}, // Background Mode
+static const char *mode_settings[][6] = {
+    {"Color", "Image", "Slideshow", "Transparent", "Collage", NULL}, // Background Mode
     {"Blank", "None", "Quit", NULL, NULL},                // OnLaunch
     {"Truncated", "Shrink", "None", NULL, NULL},          // OversizeMode
     {"Left", "Right", NULL, NULL, NULL},                  // Clock Alignment
     {"24hr", "12hr", "Auto", NULL, NULL},                 // Clock Format
     {"Big", "Little", "Auto", NULL, NULL},                // Date Format
-    {"Contain", "Cover", "Stretch", NULL, NULL}          // Photo Fit
+    {"Contain", "Cover", "Stretch", NULL, NULL},         // Photo Fit
+    {"Auto", "Split", "Feature", "Grid", NULL}           // Collage Layout
 };
 
 // A function to handle the arguments from the command line
@@ -204,6 +205,8 @@ int config_handler(void *user, const char *section, const char *name, const char
             hex_to_color(value, &config.background_color);
         else if (MATCH(name, SETTING_PHOTO_FIT))
             parse_mode_setting(MODE_SETTING_PHOTO_FIT, value, (int*) &config.photo_fit);
+        else if (MATCH(name, SETTING_COLLAGE_LAYOUT))
+            parse_mode_setting(MODE_SETTING_COLLAGE_LAYOUT, value, (int*) &config.collage_layout);
         else if (MATCH(name, SETTING_PHOTO_CROP_X))
             parse_crop_position(value, &config.photo_crop_x);
         else if (MATCH(name, SETTING_PHOTO_CROP_Y))

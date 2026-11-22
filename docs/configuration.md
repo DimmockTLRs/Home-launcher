@@ -118,6 +118,7 @@ The settings in this section control what Flex Launcher will display in the back
 - [Color](#color)
 - [Image](#image)
 - [Fit](#fit)
+- [CollageLayout](#collagelayout)
 - [CropX and CropY](#cropx-and-cropy)
 - [SlideshowDirectory](#slideshowdirectory)
 - [SlideshowImageDuration](#slideshowimageduration)
@@ -128,16 +129,17 @@ The settings in this section control what Flex Launcher will display in the back
 - [OverlayOpacity](#overlayopacity)
 
 ##### Mode
-Defines what mode the background will be. Possible values are "Color", "Image", "Slideshow", and "Transparent".
+Defines what mode the background will be. Possible values are "Color", "Image", "Slideshow", "Collage", and "Transparent".
 - Color: The background will be a solid color.
 - Image: The background will be an image.
 - Slideshow: The background will be a series of images displayed in random order, with a fading transition between each image.
+- `Collage` rotates through compositions of two to four photos from a folder.
 - Transparent: The background will be transparent. This is an advanced feature; users should read the [Transparent Backgrounds](#transparent-backgrounds) section before proceeding.
 
 Default: Color
 
 ##### Color
-Sets the solid background color. Photo modes also use this color behind transparent pixels, around contained photos, and while waiting for the first photo.
+Sets the solid background color. Photo modes also use this color behind transparent pixels, around contained photos, between collage panels, and while waiting for the first background.
 
 Default: #000000 (Black)
 
@@ -154,26 +156,41 @@ Controls how photos fill the display in both Image and Slideshow modes.
 
 Default: Contain
 
+##### CollageLayout
+
+Set `Mode=Collage` and use the same `SlideshowDirectory`, `SlideshowImageDuration`, and `SlideshowTransitionTime` settings as for a slideshow.
+
+| Layout | Arrangement |
+| --- | --- |
+| `Auto` | Rotates through the layouts the folder can fill, starting with Feature when three or more photos are available. |
+| `Split` | Two panels, side by side on landscape displays and stacked on portrait displays. |
+| `Feature` | One large panel and two smaller panels. |
+| `Grid` | Four panels in a two-by-two grid. |
+
+Each panel uses an aspect-preserving cover crop. The launcher prefers photos that were absent from the preceding collage and shares the existing slideshow scan and transition controls. A small folder falls back to fewer panels or a single contained photo. If a fixed layout can display every usable photo at once, it holds the resulting scene. Each collage is prepared as one background frame, decoding one original at a time.
+
+The default layout is `Auto`.
+
 ##### CropX and CropY
 
-These settings apply to `Cover` and take whole percentages from `0%` to `100%`. `CropX` places a horizontal crop at the left, centre, or right at `0%`, `50%`, or `100%`. `CropY` does the same vertically from top to bottom. Only the axis that needs cropping is used.
+These settings apply to `Cover` and to collage panels. Use whole percentages from `0%` to `100%`. `CropX` places a horizontal crop at the left, centre, or right at `0%`, `50%`, or `100%`. `CropY` does the same vertically from top to bottom. Only the axis that needs cropping is used.
 
 Default: 50% on both axes
 
 ##### SlideshowDirectory
-When `Mode` is set to "Slideshow", this setting defines the directory (folder) which contains the images to display in the background. Set this to the path to a folder containing JPEG, PNG, or WebP files. Put the files directly in that folder. The launcher indexes their paths once per run and skips photos it cannot decode. It keeps the last usable image if the next photo cannot be prepared.
+For Slideshow and Collage modes, set this to the path to a folder containing JPEG, PNG, or WebP files. Put the files directly in that folder. The launcher indexes their paths once per run and skips photos it cannot decode. It keeps the last usable image if the next photo cannot be prepared.
 
 Indexing and photo preparation run in the background. The launcher keeps the current frame and at most one prepared replacement. Background frames are limited to 3840 × 2160 (or 2160 × 3840 for portrait displays). Decoding very large originals can still temporarily use more memory than the prepared frames.
 
 ##### SlideshowImageDuration
-When `Mode` is set to "Slideshow", this setting defines the amount of time in seconds to display each image. Must be an integer value.
+The number of seconds to display each photo or collage before switching. Use an integer between 5 and 3600.
 
 Default: 30
 
 ##### SlideshowTransitionTime
-When `Mode` is set to "Slideshow", this setting defines the amount of time in seconds that the next background image will fade in. The fade uses elapsed time. Set this to 0 for an instant cut between images. Decimal values are acceptable.
+The time in seconds to crossfade between photos or collages. Use a number between 0 and 3. Set this to 0 for an instant cut.
 
-Default: 3
+The default is 1.5 seconds.
 
 ##### ChromaKeyColor
 When `Mode` is set to "Transparent", this setting defines the color that will be applied to the background for chroma key transparency.
@@ -552,7 +569,7 @@ Defines the amount to dim the screen. Must be a percent value.
 Default: 70%
 
 #### PauseSlideshow
-When `BackgroundMode` is set to "Slideshow", this setting defines whether or not the slideshow should be paused while the screensaver is active. This setting is a boolean "true" or "false".
+In Slideshow and Collage modes, this setting controls whether rotation pauses while the screensaver is active. This setting is a boolean "true" or "false".
 
 Default: true
 

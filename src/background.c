@@ -10,6 +10,7 @@
 
 #define MAX_PHOTO_LONG_EDGE 3840
 #define MAX_PHOTO_SHORT_EDGE 2160
+#define MAX_COLLAGE_PANELS 4
 
 extern Config config;
 
@@ -18,7 +19,10 @@ static struct {
     int *order;
     int current_index;
     int remaining_photos;
-    bool catalog_scanned;
+    int collage_cursor;
+    int last_collage[MAX_COLLAGE_PANELS];
+    int last_collage_size;
+    int auto_panels;
     int width;
     int height;
     SDL_Thread *worker;
@@ -30,27 +34,38 @@ static struct {
     Uint32 shown_at;
     Uint32 fade_started_at;
     bool finished;
-} background = { .current_index = -1 };
+} background = { .current_index = -1, .auto_panels = 3 };
+
+bool background_rotates(void)
+{
+    return config.background_mode == BACKGROUND_SLIDESHOW ||
+        config.background_mode == BACKGROUND_COLLAGE;
+}
+
+static const char *background_path(void)
+{
+    return background_rotates() ? config.slideshow_directory : config.background_image;
+}
 
 // Calculate the source crop or destination inset using the actual display aspect.
-static void photo_rects(SDL_Rect *source, SDL_Rect *destination)
+static void photo_rects(SDL_Rect *source, SDL_Rect *destination, PhotoFit fit)
 {
     Sint64 source_ratio = (Sint64)source->w * destination->h;
     Sint64 destination_ratio = (Sint64)destination->w * source->h;
 
-    if (config.photo_fit == PHOTO_CONTAIN) {
+    if (fit == PHOTO_CONTAIN) {
         if (source_ratio > destination_ratio) {
             int height = SDL_max(1, (int)(destination_ratio / source->w));
-            destination->y = (destination->h - height) / 2;
+            destination->y += (destination->h - height) / 2;
             destination->h = height;
         }
         else {
             int width = SDL_max(1, (int)(source_ratio / source->h));
-            destination->x = (destination->w - width) / 2;
+            destination->x += (destination->w - width) / 2;
             destination->w = width;
         }
     }
-    else if (config.photo_fit == PHOTO_COVER) {
+    else if (fit == PHOTO_COVER) {
         if (source_ratio > destination_ratio) {
             int width = SDL_max(1, (int)(destination_ratio / destination->h));
             source->x = (int)((Sint64)(source->w - width) * config.photo_crop_x / 100);
@@ -64,50 +79,71 @@ static void photo_rects(SDL_Rect *source, SDL_Rect *destination)
     }
 }
 
-// Prepare an opaque frame, so the bars around a portrait and transparent pixels
-// participate in the same crossfade as the photo.
+// One opaque frame includes the photos, any matte, and the gutters, so all
+// parts of the outgoing and incoming compositions crossfade together.
+static SDL_Surface *new_photo_frame(void)
+{
+    SDL_Surface *frame = SDL_CreateRGBSurfaceWithFormat(0, background.width,
+        background.height, 32, SDL_PIXELFORMAT_RGB888);
+    if (frame != NULL) {
+        SDL_Color fill = config.background_color;
+        if (SDL_FillRect(frame, NULL, SDL_MapRGB(frame->format, fill.r, fill.g, fill.b)) < 0) {
+            SDL_FreeSurface(frame);
+            return NULL;
+        }
+    }
+    return frame;
+}
+
+static bool blit_photo(SDL_Surface *photo, SDL_Surface *frame, SDL_Rect panel, PhotoFit fit)
+{
+    SDL_Rect source = { 0, 0, photo->w, photo->h };
+    photo_rects(&source, &panel, fit);
+    return SDL_BlitScaled(photo, &source, frame, &panel) == 0;
+}
+
 static SDL_Surface *prepare_photo(const char *path)
 {
     SDL_Surface *photo = IMG_Load(path);
     if (photo == NULL)
         return NULL;
 
-    SDL_Surface *frame = SDL_CreateRGBSurfaceWithFormat(0, background.width,
-        background.height, 32, SDL_PIXELFORMAT_RGB888);
+    SDL_Surface *frame = new_photo_frame();
     if (frame != NULL) {
-        SDL_Color fill = config.background_color;
-        SDL_Rect source = { 0, 0, photo->w, photo->h };
-        SDL_Rect destination = { 0, 0, frame->w, frame->h };
-        photo_rects(&source, &destination);
-
-        int status = SDL_FillRect(frame, NULL, SDL_MapRGB(frame->format, fill.r, fill.g, fill.b));
-        if (status == 0)
-            status = SDL_BlitScaled(photo, &source, frame, &destination);
-        if (status < 0) {
+        SDL_Rect panel = { 0, 0, frame->w, frame->h };
+        if (!blit_photo(photo, frame, panel, config.photo_fit)) {
             SDL_FreeSurface(frame);
             frame = NULL;
         }
     }
-
     SDL_FreeSurface(photo);
     return frame;
 }
 
+static bool init_photo_catalog(void)
+{
+    if (background.order != NULL)
+        return true;
+    if (!scan_slideshow_directory(&background.files, config.slideshow_directory,
+            &background.stop_requested) || background.files.count == 0)
+        return false;
+
+    background.order = malloc((size_t)background.files.count * sizeof(*background.order));
+    if (background.order == NULL)
+        return false;
+    background.remaining_photos = background.files.count;
+    random_array(background.order, background.files.count);
+    return true;
+}
+
+static void skip_photo(int index)
+{
+    background.order[index] = -1;
+    background.remaining_photos--;
+}
+
 static SDL_Surface *next_slideshow_photo(void)
 {
-    if (!background.catalog_scanned) {
-        background.catalog_scanned = true;
-        if (!scan_slideshow_directory(&background.files, config.slideshow_directory,
-                &background.stop_requested) || background.files.count == 0)
-            return NULL;
-
-        background.order = malloc((size_t)background.files.count * sizeof(*background.order));
-        if (background.order == NULL)
-            return NULL;
-        background.remaining_photos = background.files.count;
-        random_array(background.order, background.files.count);
-    }
-
     int index = background.current_index;
     for (int attempt = 0; attempt < background.files.count; attempt++) {
         if (SDL_AtomicGet(&background.stop_requested))
@@ -124,8 +160,178 @@ static SDL_Surface *next_slideshow_photo(void)
             return frame;
         }
         // Skip this file for the rest of this run.
-        background.order[index] = -1;
-        background.remaining_photos--;
+        skip_photo(index);
+    }
+    return NULL;
+}
+
+static int fixed_panel_count(void)
+{
+    switch (config.collage_layout) {
+        case COLLAGE_SPLIT:   return 2;
+        case COLLAGE_FEATURE: return 3;
+        case COLLAGE_GRID:    return 4;
+        default:              return 0;
+    }
+}
+
+static bool have_another_background(void)
+{
+    if (config.background_mode == BACKGROUND_SLIDESHOW)
+        return background.remaining_photos > 1;
+    if (config.background_mode == BACKGROUND_COLLAGE) {
+        int count = fixed_panel_count();
+        return background.remaining_photos > (count == 0 ? 2 : count);
+    }
+    return false;
+}
+
+static void collage_panels(SDL_Rect panels[], int count)
+{
+    int width = background.width;
+    int height = background.height;
+    int gap = SDL_max(1, SDL_min(width, height) / 180);
+    int left = (width - gap) / 2;
+    int top = (height - gap) / 2;
+    int right_x = left + gap;
+    int bottom_y = top + gap;
+
+    if (count == 1) {
+        panels[0] = (SDL_Rect){ 0, 0, width, height };
+    }
+    else if (count == 2 && width >= height) {
+        panels[0] = (SDL_Rect){ 0, 0, left, height };
+        panels[1] = (SDL_Rect){ right_x, 0, width - right_x, height };
+    }
+    else if (count == 2) {
+        panels[0] = (SDL_Rect){ 0, 0, width, top };
+        panels[1] = (SDL_Rect){ 0, bottom_y, width, height - bottom_y };
+    }
+    else if (count == 3 && width >= height) {
+        left = (width - gap) * 3 / 5;
+        right_x = left + gap;
+        panels[0] = (SDL_Rect){ 0, 0, left, height };
+        panels[1] = (SDL_Rect){ right_x, 0, width - right_x, top };
+        panels[2] = (SDL_Rect){ right_x, bottom_y, width - right_x, height - bottom_y };
+    }
+    else if (count == 3) {
+        top = (height - gap) * 3 / 5;
+        bottom_y = top + gap;
+        panels[0] = (SDL_Rect){ 0, 0, width, top };
+        panels[1] = (SDL_Rect){ 0, bottom_y, left, height - bottom_y };
+        panels[2] = (SDL_Rect){ right_x, bottom_y, width - right_x, height - bottom_y };
+    }
+    else {
+        panels[0] = (SDL_Rect){ 0, 0, left, top };
+        panels[1] = (SDL_Rect){ right_x, 0, width - right_x, top };
+        panels[2] = (SDL_Rect){ 0, bottom_y, left, height - bottom_y };
+        panels[3] = (SDL_Rect){ right_x, bottom_y, width - right_x, height - bottom_y };
+    }
+}
+
+static bool includes_photo(const int selected[], int size, int index)
+{
+    for (int i = 0; i < size; i++) {
+        if (selected[i] == index)
+            return true;
+    }
+    return false;
+}
+
+// Prefer the free panel that retains the most of the current photo under Cover.
+static int best_panel(const SDL_Surface *photo, const SDL_Rect panels[], int count, unsigned int occupied)
+{
+    double aspect = (double)photo->w / photo->h;
+    double best_score = -1.0;
+    int best = 0;
+    for (int i = 0; i < count; i++) {
+        if (occupied & (1u << i))
+            continue;
+        double panel_aspect = (double)panels[i].w / panels[i].h;
+        double score = SDL_min(aspect / panel_aspect, panel_aspect / aspect);
+        if (score > best_score) {
+            best_score = score;
+            best = i;
+        }
+    }
+    return best;
+}
+
+static int fill_collage(SDL_Surface *frame, int count, int selected[])
+{
+    SDL_Rect panels[MAX_COLLAGE_PANELS];
+    collage_panels(panels, count);
+    int filled = 0;
+    unsigned int occupied = 0;
+
+    // Only fall back to photos from the preceding collage if there are too few
+    // other usable photos. Each pass visits at most one cycle of the catalog.
+    for (int pass = 0; pass < 2 && filled < count; pass++) {
+        for (int inspected = 0; inspected < background.files.count && filled < count; inspected++) {
+            if (SDL_AtomicGet(&background.stop_requested))
+                return filled;
+            int index = background.collage_cursor;
+            background.collage_cursor = (index + 1) % background.files.count;
+            int file = background.order[index];
+            if (file < 0 || includes_photo(selected, filled, index) ||
+                (pass == 0 && includes_photo(background.last_collage, background.last_collage_size, index)))
+                continue;
+
+            SDL_Surface *photo = IMG_Load(background.files.paths[file]);
+            if (photo == NULL) {
+                skip_photo(index);
+                continue;
+            }
+            int panel = best_panel(photo, panels, count, occupied);
+            bool drawn = blit_photo(photo, frame, panels[panel], count == 1 ? PHOTO_CONTAIN : PHOTO_COVER);
+            SDL_FreeSurface(photo);
+            if (drawn) {
+                occupied |= 1u << panel;
+                selected[filled++] = index;
+            }
+            else
+                skip_photo(index);
+        }
+    }
+    return filled;
+}
+
+static SDL_Surface *next_collage(void)
+{
+    int panels = fixed_panel_count();
+    if (panels == 0)
+        panels = background.auto_panels;
+    panels = SDL_min(panels, background.remaining_photos);
+    if (background.width < 4 || background.height < 4)
+        panels = SDL_min(panels, 1);
+
+    while (panels > 0 && !SDL_AtomicGet(&background.stop_requested)) {
+        SDL_Surface *frame = new_photo_frame();
+        if (frame == NULL)
+            return NULL;
+
+        int selected[MAX_COLLAGE_PANELS];
+        int filled = fill_collage(frame, panels, selected);
+        if (filled == panels) {
+            // An exhausted folder can contain exactly the same usable set as the
+            // preceding frame. Keep it on screen without performing another fade.
+            bool changed = panels != background.last_collage_size;
+            for (int i = 0; i < filled && !changed; i++)
+                changed = !includes_photo(background.last_collage, background.last_collage_size, selected[i]);
+            if (!changed) {
+                SDL_FreeSurface(frame);
+                return NULL;
+            }
+
+            SDL_memcpy(background.last_collage, selected, (size_t)filled * sizeof(*selected));
+            background.last_collage_size = filled;
+            int max_panels = SDL_min(MAX_COLLAGE_PANELS, background.remaining_photos);
+            background.auto_panels = filled < max_panels ? filled + 1 : 2;
+            return frame;
+        }
+
+        SDL_FreeSurface(frame);
+        panels = filled;
     }
     return NULL;
 }
@@ -133,8 +339,12 @@ static SDL_Surface *next_slideshow_photo(void)
 static int prepare_background(void *unused)
 {
     (void)unused;
-    background.prepared = config.background_mode == BACKGROUND_SLIDESHOW ?
-        next_slideshow_photo() : prepare_photo(config.background_image);
+    if (config.background_mode == BACKGROUND_IMAGE)
+        background.prepared = prepare_photo(config.background_image);
+    else if (init_photo_catalog()) {
+        background.prepared = config.background_mode == BACKGROUND_COLLAGE ?
+            next_collage() : next_slideshow_photo();
+    }
     SDL_AtomicSet(&background.ready, 1);
     return 0;
 }
@@ -150,10 +360,9 @@ static bool start_background_worker(void)
 
 void init_background(SDL_Renderer *renderer)
 {
-    bool slideshow = config.background_mode == BACKGROUND_SLIDESHOW;
-    if (!slideshow && config.background_mode != BACKGROUND_IMAGE)
+    if (!background_rotates() && config.background_mode != BACKGROUND_IMAGE)
         return;
-    const char *path = slideshow ? config.slideshow_directory : config.background_image;
+    const char *path = background_path();
     if (path == NULL || path[0] == '\0') {
         log_error("No path configured for the photo background; using the background color");
         background.finished = true;
@@ -200,6 +409,7 @@ void update_background(SDL_Renderer *renderer, Uint32 now, bool paused)
         background.current = background.incoming;
         background.incoming = NULL;
         background.shown_at = now;
+        background.finished = !have_another_background();
         return;
     }
 
@@ -220,16 +430,18 @@ void update_background(SDL_Renderer *renderer, Uint32 now, bool paused)
     background.prepared = NULL;
 
     if (frame == NULL) {
-        const char *path = config.background_mode == BACKGROUND_SLIDESHOW ?
-            config.slideshow_directory : config.background_image;
+        const char *path = background_path();
         if (background.current == NULL) {
             log_error("Could not prepare a photo background from '%s'; using the background color", path);
             background.finished = true;
         }
         else {
-            log_debug("Slideshow kept the current image: no replacement texture available");
+            if (config.background_mode == BACKGROUND_COLLAGE)
+                log_debug("Collage kept the current scene: no replacement available");
+            else
+                log_debug("Slideshow kept the current image: no replacement texture available");
             background.shown_at = now;
-            background.finished = background.remaining_photos < 2;
+            background.finished = !have_another_background();
         }
         return;
     }
@@ -239,14 +451,21 @@ void update_background(SDL_Renderer *renderer, Uint32 now, bool paused)
         SDL_SetTextureAlphaMod(frame, 0);
         background.incoming = frame;
         background.fade_started_at = SDL_GetTicks();
-        log_debug("Starting slideshow crossfade (%u ms)", (unsigned)config.slideshow_transition_time);
+        if (config.background_mode == BACKGROUND_COLLAGE)
+            log_debug("Starting collage crossfade to %i panels (%u ms)",
+                background.last_collage_size, (unsigned)config.slideshow_transition_time);
+        else
+            log_debug("Starting slideshow crossfade (%u ms)", (unsigned)config.slideshow_transition_time);
     }
     else {
         SDL_DestroyTexture(background.current);
         background.current = frame;
         background.shown_at = SDL_GetTicks();
-        background.finished = config.background_mode != BACKGROUND_SLIDESHOW || background.remaining_photos < 2;
-        if (config.background_mode == BACKGROUND_SLIDESHOW)
+        background.finished = !have_another_background();
+        if (config.background_mode == BACKGROUND_COLLAGE)
+            log_debug("Displayed a %i-panel collage from a catalog of %i files",
+                background.last_collage_size, background.files.count);
+        else if (config.background_mode == BACKGROUND_SLIDESHOW)
             log_debug("Displayed a slideshow photo from a catalog of %i files", background.files.count);
     }
 }

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <SDL.h>
 
+bool background_rotates(void);
 void init_background(SDL_Renderer *renderer);
 void update_background(SDL_Renderer *renderer, Uint32 now, bool paused);
 void draw_background(SDL_Renderer *renderer);

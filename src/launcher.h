@@ -60,14 +60,16 @@ typedef enum {
     MODE_SETTING_ALIGNMENT,
     MODE_SETTING_TIME_FORMAT,
     MODE_SETTING_DATE_FORMAT,
-    MODE_SETTING_PHOTO_FIT
+    MODE_SETTING_PHOTO_FIT,
+    MODE_SETTING_COLLAGE_LAYOUT
 } ModeSettingType;
 
 typedef enum {
     BACKGROUND_COLOR,
     BACKGROUND_IMAGE,
     BACKGROUND_SLIDESHOW,
-    BACKGROUND_TRANSPARENT
+    BACKGROUND_TRANSPARENT,
+    BACKGROUND_COLLAGE
 } ModeBackground;
 
 typedef enum {
@@ -75,6 +77,13 @@ typedef enum {
     PHOTO_COVER,
     PHOTO_STRETCH
 } PhotoFit;
+
+typedef enum {
+    COLLAGE_AUTO,
+    COLLAGE_SPLIT,
+    COLLAGE_FEATURE,
+    COLLAGE_GRID
+} CollageLayout;
 
 typedef enum {
     ON_LAUNCH_BLANK,
@@ -242,6 +251,7 @@ typedef struct {
     SDL_Color background_color; // Background color
     SDL_Color chroma_key_color;
     PhotoFit photo_fit;
+    CollageLayout collage_layout;
     int photo_crop_x;
     int photo_crop_y;
     char *background_image; // Path to background image

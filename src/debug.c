@@ -117,6 +117,7 @@ void debug_settings()
     DEBUG_COLOR(SETTING_BACKGROUND_COLOR, config.background_color);
     DEBUG_STR(SETTING_BACKGROUND_IMAGE, config.background_image);
     DEBUG_MODE(SETTING_PHOTO_FIT, MODE_SETTING_PHOTO_FIT, config.photo_fit);
+    DEBUG_MODE(SETTING_COLLAGE_LAYOUT, MODE_SETTING_COLLAGE_LAYOUT, config.collage_layout);
     DEBUG_INT(SETTING_PHOTO_CROP_X, config.photo_crop_x);
     DEBUG_INT(SETTING_PHOTO_CROP_Y, config.photo_crop_y);
     DEBUG_STR(SETTING_SLIDESHOW_DIRECTORY, config.slideshow_directory);

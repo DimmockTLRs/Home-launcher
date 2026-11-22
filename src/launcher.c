@@ -63,6 +63,7 @@ Config config = {
     .title_shadow_color.a             = DEFAULT_TITLE_SHADOW_COLOR_A,
     .background_mode                  = BACKGROUND_COLOR,
     .photo_fit                        = PHOTO_CONTAIN,
+    .collage_layout                   = COLLAGE_AUTO,
     .photo_crop_x                     = 50,
     .photo_crop_y                     = 50,
     .background_color.r               = DEFAULT_BACKGROUND_COLOR_R,
@@ -955,7 +956,7 @@ static void update_screensaver()
     if (!state.screensaver_active && ticks.main - ticks.last_input > config.screensaver_idle_time) {
         state.screensaver_active = true;
         state.screensaver_transition = true;
-        if (config.background_mode == BACKGROUND_SLIDESHOW && config.screensaver_pause_slideshow)
+        if (background_rotates() && config.screensaver_pause_slideshow)
             state.slideshow_paused = true;
     }
     else {
@@ -977,7 +978,7 @@ static void update_screensaver()
             screensaver->alpha = 0.0f;
             state.screensaver_active = false;
             state.screensaver_transition = false;
-            if (config.background_mode == BACKGROUND_SLIDESHOW) {
+            if (background_rotates()) {
                 state.slideshow_paused = false;
                 
                 // Reset the slideshow time so we don't have a transition immediately 
@@ -1044,7 +1045,7 @@ static inline void post_launch()
         connect_gamepad(-1, true, false);
     if (config.clock_enabled)
         update_clock();
-    if (config.background_mode == BACKGROUND_SLIDESHOW)
+    if (background_rotates())
         restart_background_interval(ticks.main);
     if (config.on_launch == ON_LAUNCH_BLANK)
         set_draw_color();
@@ -1305,7 +1306,7 @@ int main(int argc, char *argv[])
             if (gamepads != NULL)
                 poll_gamepad();
             if (config.background_mode == BACKGROUND_IMAGE ||
-                config.background_mode == BACKGROUND_SLIDESHOW)
+                background_rotates())
                 update_background(renderer, ticks.main, state.slideshow_paused);
             if (config.screensaver_enabled)
                 update_screensaver();
