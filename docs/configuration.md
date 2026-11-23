@@ -219,6 +219,7 @@ The settings in this section define the geometric layout of the launcher.
 - [IconSize](#iconsize)
 - [IconSpacing](#iconspacing)
 - [VCenter](#vcenter)
+- [NavigationPop and NavigationSound](#navigationpop-and-navigationsound)
 
 ##### MaxButtons
 The maximum number of buttons that can be displayed on the screen. If a menu has more entries than this value, it will be split into multiple pages. A value of 3-5 is sensible for a typical TV size and viewing distance.
@@ -239,6 +240,10 @@ Default: 5%
 Defines the vertical centering of the menu entries in percent of the screen height. A value of 50% will cause the buttons to be centered halfway in the screen. Increasing the value will lower the buttons, and lowering it will raise them.
 
 Default: 50%
+
+##### NavigationPop and NavigationSound
+
+Set `NavigationPop=true` in `[Layout]` to briefly enlarge a logo when keyboard or gamepad navigation moves to it. The logo settles back to its original size. Set `NavigationSound=true` to play a soft chime through the default audio device on the same selection change. Both settings default to false and can be enabled independently.
 
 #### Titles
 The settings in this section affect the application titles that display below the icons.

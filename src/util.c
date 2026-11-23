@@ -192,6 +192,10 @@ int config_handler(void *user, const char *section, const char *name, const char
                     config.icon_spacing = icon_spacing;
             }
         }
+        else if (MATCH(name, SETTING_NAVIGATION_POP))
+            convert_bool(value, &config.navigation_pop);
+        else if (MATCH(name, SETTING_NAVIGATION_SOUND))
+            convert_bool(value, &config.navigation_sound);
         else if (MATCH(name, SETTING_VCENTER)) {
             if (is_percent(value))
                 copy_string(config.vcenter, value, sizeof(config.vcenter));

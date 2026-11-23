@@ -281,6 +281,8 @@ typedef struct {
     int highlight_vpadding;
     int highlight_hpadding;
     char vcenter[PERCENT_MAX_CHARS];
+    bool navigation_pop;
+    bool navigation_sound;
     bool scroll_indicators;
     SDL_Color scroll_indicator_fill_color;
     int scroll_indicator_outline_size;

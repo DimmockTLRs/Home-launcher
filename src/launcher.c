@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <math.h>
 #include <time.h>
 #include <SDL.h>
 #include <SDL_syswm.h>
@@ -185,6 +186,88 @@ Uint32 delay_period;
 Uint32 repeat_period;
 
 
+#define NAVIGATION_POP_MS 200u
+#define NAVIGATION_AUDIO_RATE 48000
+#define NAVIGATION_AUDIO_SAMPLES (NAVIGATION_AUDIO_RATE * 65 / 1000)
+
+static Entry *navigation_entry;
+static Uint32 navigation_started;
+static SDL_AudioDeviceID navigation_device;
+static float navigation_tone[NAVIGATION_AUDIO_SAMPLES];
+
+static void init_navigation_audio(void)
+{
+    if (!config.navigation_sound)
+        return;
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
+        log_error("Navigation sound unavailable: %s", SDL_GetError());
+        return;
+    }
+
+    SDL_AudioSpec spec = {
+        .freq = NAVIGATION_AUDIO_RATE,
+        .format = AUDIO_F32SYS,
+        .channels = 1,
+        .samples = 256,
+    };
+    navigation_device = SDL_OpenAudioDevice(NULL, 0, &spec, NULL, 0);
+    if (navigation_device == 0) {
+        log_error("Navigation sound unavailable: %s", SDL_GetError());
+        return;
+    }
+
+    // A short, softly decaying two-tone chime. Fade both ends to avoid clicks.
+    for (int i = 0; i < NAVIGATION_AUDIO_SAMPLES; i++) {
+        float t = (float)i / NAVIGATION_AUDIO_RATE;
+        float attack = SDL_min(1.0f, t / 0.006f);
+        float decay = 1.0f - (float)i / (NAVIGATION_AUDIO_SAMPLES - 1);
+        float wave = sinf(6.2831853f * 660.0f * t) + 0.25f * sinf(6.2831853f * 990.0f * t);
+        navigation_tone[i] = 0.13f * attack * decay * decay * wave;
+    }
+    SDL_PauseAudioDevice(navigation_device, 0);
+}
+
+static void navigation_moved(const Entry *previous)
+{
+    if (previous == current_entry)
+        return;
+    if (config.navigation_pop) {
+        navigation_entry = current_entry;
+        navigation_started = SDL_GetTicks();
+    }
+    if (navigation_device != 0 && SDL_GetQueuedAudioSize(navigation_device) == 0 &&
+        SDL_QueueAudio(navigation_device, navigation_tone, sizeof(navigation_tone)) < 0)
+        log_error("Could not play navigation sound: %s", SDL_GetError());
+}
+
+static SDL_Rect navigation_icon_rect(const Entry *entry)
+{
+    SDL_Rect rect = entry->icon_rect;
+    if (entry == navigation_entry) {
+        Uint32 elapsed = SDL_GetTicks() - navigation_started;
+        if (elapsed >= NAVIGATION_POP_MS) {
+            navigation_entry = NULL;
+            return rect;
+        }
+
+        // Grow quickly and settle more slowly. Bound the expansion so the
+        // logo keeps its aspect ratio and clears its neighbours and title.
+        float phase = elapsed / (float)NAVIGATION_POP_MS;
+        float progress = phase < 0.25f ? 4.0f * phase : (1.0f - phase) / 0.75f;
+        float eased = progress * progress * (3.0f - 2.0f * progress);
+        int space = SDL_min(config.icon_spacing / 2, SDL_min(rect.x, geo.screen_width - rect.x - rect.w));
+        space = SDL_min(space, SDL_min(rect.y, geo.screen_height - rect.y - rect.h));
+        if (config.titles_enabled)
+            space = SDL_min(space, SDL_max(0, entry->text_rect.y - rect.y - rect.h));
+        int inset = SDL_max(0, SDL_min(space, (int)(rect.w * 0.045f * eased + 0.5f)));
+        rect.x -= inset;
+        rect.y -= inset;
+        rect.w += 2 * inset;
+        rect.h += 2 * inset;
+    }
+    return rect;
+}
+
 // A function to initialize SDL
 static void init_sdl()
 {    
@@ -331,6 +414,9 @@ static void cleanup()
         SDL_DestroyWindow(window);
         window = NULL;
     }
+
+    if (navigation_device != 0)
+        SDL_CloseAudioDevice(navigation_device);
 
     // Quit subsystems
     quit_svg();
@@ -507,6 +593,7 @@ static int load_menu(Menu *menu, bool set_back_menu, bool reset_position)
     if (set_back_menu)
         current_menu->back = previous_menu;
 
+    navigation_entry = NULL;
     if (reset_position) {
         current_entry = current_menu->first_entry;
         current_menu->root_entry = current_entry;
@@ -579,6 +666,7 @@ static void render_buttons(Menu *menu)
 // A function to move the selection left when clicked by user
 static void move_left()
 {
+    Entry *previous = current_entry;
     // If we are not in leftmost position, move highlight left
     if (current_menu->highlight_position > 0) {
         if (config.highlight)
@@ -616,11 +704,13 @@ static void move_left()
             highlight->rect.x = current_entry->icon_rect.x - config.highlight_hpadding;
         current_menu->highlight_position = buttons - 1;
     }
+    navigation_moved(previous);
 }
 
 // A function to move the selection right when clicked by the user
 static void move_right()
 {
+    Entry *previous = current_entry;
     // If we are not in the rightmost position, move highlight right
     if ((int) current_menu->highlight_position < (geo.num_buttons - 1)) {
         if (config.highlight)
@@ -654,6 +744,7 @@ static void move_right()
             highlight->rect.x = current_entry->icon_rect.x - config.highlight_hpadding;
         calculate_button_geometry(current_menu->root_entry, (int) MIN(current_menu->num_entries, config.max_buttons));
     }
+    navigation_moved(previous);
 }
 
 // A function to load a submenu
@@ -709,7 +800,8 @@ static void draw_screen()
         SDL_Texture *icon;
         for (int i = 0; i < geo.num_buttons; i++) {
             icon = (entry->icon_selected != NULL && i == (int) current_menu->highlight_position) ? entry->icon_selected : entry->icon;
-            SDL_RenderCopy(renderer, icon, NULL, &entry->icon_rect);
+            SDL_Rect icon_rect = navigation_icon_rect(entry);
+            SDL_RenderCopy(renderer, icon, NULL, &icon_rect);
             if (config.titles_enabled)
                 SDL_RenderCopy(renderer, entry->title_texture, NULL, &entry->text_rect);
             entry = entry-> next;
@@ -1112,6 +1204,7 @@ int main(int argc, char *argv[])
 
     // Initialize SDL, verify all settings are in their allowable range
     init_sdl();
+    init_navigation_audio();
     init_sdl_image();
     init_sdl_ttf();
     validate_settings(&geo);
