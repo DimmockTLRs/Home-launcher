@@ -101,7 +101,7 @@ void handle_arguments(int argc, char *argv[], char **config_file_path)
         prefixes[3] = PATH_CONFIG_SYSTEM;
         *config_file_path = find_file(FILENAME_DEFAULT_CONFIG, 4, prefixes);
 #else
-        char *prefixes[2];
+        const char *prefixes[2];
         prefixes[0] = CURRENT_DIRECTORY;
         prefixes[1] = config.exe_path;
         *config_file_path = find_file(FILENAME_DEFAULT_CONFIG, 2, prefixes);

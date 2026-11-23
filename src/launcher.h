@@ -1,3 +1,5 @@
+#include <stdio.h>
+
 // Color masking bit logic
 #if SDL_BYTEORDER == SDL_BIG_ENDIAN
 #define RMASK 0xff000000
