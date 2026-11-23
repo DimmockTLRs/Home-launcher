@@ -42,7 +42,15 @@ jobs:
             -D CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 
       - name: Build and package
-        run: cmake --build build --target package --config Release
+        run: |
+          cmake --build build --target package --config Release 2>&1 | Tee-Object -FilePath build/windows-build.log
+          $buildExit = $LASTEXITCODE
+          if ($buildExit -ne 0) {
+            Select-String -Path build/windows-build.log -Pattern '\berror\s+(C|LNK|MSB|RC)\d+|CMake Error' |
+              Select-Object -First 8 |
+              ForEach-Object { Write-Output "::error::$($_.Line)" }
+            exit $buildExit
+          }
 
       - name: Verify and stage Windows package
         id: windows_package
