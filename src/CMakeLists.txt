@@ -48,6 +48,7 @@ else ()
 	${INIH}
   ${GETOPT}
 	PowrProf
+  winhttp
   )
   target_include_directories(${EXECUTABLE_TITLE} PUBLIC ${INIH_INCLUDE_DIR} ${GETOPT_INCLUDE_DIR})
 endif ()
