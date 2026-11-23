@@ -135,6 +135,14 @@ static void parse_crop_position(const char *value, int *position)
         *position = (int)percent;
 }
 
+static void parse_coordinate(const char *value, double limit, double *coordinate)
+{
+    char *end;
+    double parsed = strtod(value, &end);
+    if (end != value && *end == '\0' && parsed >= -limit && parsed <= limit)
+        *coordinate = parsed;
+}
+
 int config_handler(void *user, const char *section, const char *name, const char *value)
 {
     UNUSED(user);
@@ -191,6 +199,12 @@ int config_handler(void *user, const char *section, const char *name, const char
                 if (icon_spacing > 0 || MATCH(value, "0"))
                     config.icon_spacing = icon_spacing;
             }
+        }
+        else if (MATCH(name, SETTING_LAYOUT_STYLE)) {
+            if (MATCH(value, "TV"))
+                config.tv_layout = true;
+            else if (MATCH(value, "Classic"))
+                config.tv_layout = false;
         }
         else if (MATCH(name, SETTING_NAVIGATION_POP))
             convert_bool(value, &config.navigation_pop);
@@ -370,6 +384,23 @@ int config_handler(void *user, const char *section, const char *name, const char
             parse_mode_setting(MODE_SETTING_DATE_FORMAT, value, (int*) &config.clock_date_format);
         else if (MATCH(name, SETTING_CLOCK_INCLUDE_WEEKDAY))
             convert_bool(value, &config.clock_include_weekday);
+    }
+
+    else if (MATCH(section, "Weather")) {
+        if (MATCH(name, "Enabled"))
+            convert_bool(value, &config.weather.enabled);
+        else if (MATCH(name, "Location"))
+            copy_string(config.weather.location, value, sizeof(config.weather.location));
+        else if (MATCH(name, "Latitude"))
+            parse_coordinate(value, 90, &config.weather.latitude);
+        else if (MATCH(name, "Longitude"))
+            parse_coordinate(value, 180, &config.weather.longitude);
+        else if (MATCH(name, "Units")) {
+            if (MATCH(value, "Fahrenheit"))
+                config.weather.fahrenheit = true;
+            else if (MATCH(value, "Celsius"))
+                config.weather.fahrenheit = false;
+        }
     }
 
     else if (MATCH(section, "Screensaver")) {
@@ -884,7 +915,7 @@ static void add_gamepad_control(const char *label, const char *cmd)
         .type     = info[i].type,
         .index    = info[i].index,
         .label    = info[i].label,
-        .repeat   = 0,
+        .repeat_at = 0,
         .next     = NULL
     };
     current_gamepad_control->cmd = strdup(cmd);
@@ -906,7 +937,7 @@ void convert_percent_to_int(char *string, int *result, int max_value)
 void validate_settings(Geometry *geo)
 {
     // Reduce number of buttons if they can't all fit on screen
-    if (config.icon_size * config.max_buttons > (unsigned int) geo->screen_width) {
+    if (!config.tv_layout && config.icon_size * config.max_buttons > (unsigned int) geo->screen_width) {
         unsigned int i;
         for (i = config.max_buttons; i * config.icon_size > (unsigned int) geo->screen_width && i > 0; i--);
         log_error(

@@ -12,6 +12,8 @@
 #include <launcher_config.h>
 #include "image.h"
 #include "background.h"
+#include "tv_ui.h"
+#include "weather.h"
 #include "util.h"
 #include "debug.h"
 #include "clock.h"
@@ -24,7 +26,7 @@ static void init_sdl_ttf(void);
 static int load_menu(Menu *menu, bool set_back_menu, bool reset_position);
 static int load_menu_by_name(const char *menu_name, bool set_back_menu, bool reset_position);
 static void update_screensaver(void);
-static void update_clock(void);
+static bool update_clock(void);
 static void init_screensaver(void);
 static void calculate_button_geometry(Entry *entry, int buttons);
 static void render_buttons(Menu *menu);
@@ -64,6 +66,8 @@ Config config = {
     .title_shadow_color.a             = DEFAULT_TITLE_SHADOW_COLOR_A,
     .background_mode                  = BACKGROUND_COLOR,
     .photo_fit                        = PHOTO_CONTAIN,
+    .weather.latitude                 = 999,
+    .weather.longitude                = 999,
     .collage_layout                   = COLLAGE_AUTO,
     .photo_crop_x                     = 50,
     .photo_crop_y                     = 50,
@@ -182,8 +186,7 @@ TextInfo title_info;
 Ticks ticks;
 Geometry geo;
 Uint32 refresh_period;
-Uint32 delay_period;
-Uint32 repeat_period;
+static bool redraw_requested = true;
 
 
 #define NAVIGATION_POP_MS 200u
@@ -227,10 +230,13 @@ static void init_navigation_audio(void)
     SDL_PauseAudioDevice(navigation_device, 0);
 }
 
-static void navigation_moved(const Entry *previous)
+static void navigation_moved(const Entry *previous, SDL_Rect previous_card, int page_direction)
 {
     if (previous == current_entry)
         return;
+    redraw_requested = true;
+    if (config.tv_layout)
+        move_tv_focus(previous_card, current_entry->card_rect.x, page_direction);
     if (config.navigation_pop) {
         navigation_entry = current_entry;
         navigation_started = SDL_GetTicks();
@@ -255,7 +261,8 @@ static SDL_Rect navigation_icon_rect(const Entry *entry)
         float phase = elapsed / (float)NAVIGATION_POP_MS;
         float progress = phase < 0.25f ? 4.0f * phase : (1.0f - phase) / 0.75f;
         float eased = progress * progress * (3.0f - 2.0f * progress);
-        int space = SDL_min(config.icon_spacing / 2, SDL_min(rect.x, geo.screen_width - rect.x - rect.w));
+        int spacing = config.tv_layout ? rect.y - entry->card_rect.y : config.icon_spacing / 2;
+        int space = SDL_min(spacing, SDL_min(rect.x, geo.screen_width - rect.x - rect.w));
         space = SDL_min(space, SDL_min(rect.y, geo.screen_height - rect.y - rect.h));
         if (config.titles_enabled)
             space = SDL_min(space, SDL_max(0, entry->text_rect.y - rect.y - rect.h));
@@ -322,12 +329,6 @@ static void create_window()
     if (config.vsync) {
         refresh_period = SDL_max(1u, 1000 / (Uint32) display_mode.refresh_rate);
         renderer_flags |= SDL_RENDERER_PRESENTVSYNC;
-    }
-    if (config.gamepad_enabled) {
-        delay_period = GAMEPAD_REPEAT_DELAY / refresh_period;
-        repeat_period = GAMEPAD_REPEAT_INTERVAL / refresh_period;
-        if (!repeat_period)
-            repeat_period = 1;
     }
     renderer = SDL_CreateRenderer(window, -1, renderer_flags);
     if (renderer == NULL)
@@ -398,6 +399,8 @@ static void init_sdl_ttf()
 static void cleanup()
 {
     quit_background();
+    quit_tv_ui();
+    quit_weather();
     if (gamepads != NULL)
         disconnect_gamepad(-1, true, true);
     if (title_info.font != NULL)
@@ -594,6 +597,8 @@ static int load_menu(Menu *menu, bool set_back_menu, bool reset_position)
         current_menu->back = previous_menu;
 
     navigation_entry = NULL;
+    reset_tv_motion();
+    redraw_requested = true;
     if (reset_position) {
         current_entry = current_menu->first_entry;
         current_menu->root_entry = current_entry;
@@ -609,7 +614,7 @@ static int load_menu(Menu *menu, bool set_back_menu, bool reset_position)
     
     // Recalculate the screen geometry
     calculate_button_geometry(current_menu->root_entry, (int) buttons);
-    if (config.highlight) {
+    if (config.highlight && !config.tv_layout) {
         highlight->rect.x = current_entry->icon_rect.x - config.highlight_hpadding;
         highlight->rect.y = current_entry->icon_rect.y - config.highlight_vpadding;
     }
@@ -626,6 +631,11 @@ static int load_menu_by_name(const char *menu_name, bool set_back_menu, bool res
 // A function to calculate the layout of the buttons
 static void calculate_button_geometry(Entry *entry, int buttons)
 {
+    if (config.tv_layout) {
+        layout_tv_entries(entry, buttons);
+        return;
+    }
+
     // Calculate proper spacing
     geo.x_margin = (geo.screen_width - config.icon_size*buttons -
                    buttons*config.icon_spacing + config.icon_spacing) / 2;
@@ -667,9 +677,11 @@ static void render_buttons(Menu *menu)
 static void move_left()
 {
     Entry *previous = current_entry;
+    SDL_Rect previous_card = previous->card_rect;
+    unsigned int previous_page = current_menu->page;
     // If we are not in leftmost position, move highlight left
     if (current_menu->highlight_position > 0) {
-        if (config.highlight)
+        if (config.highlight && !config.tv_layout)
             highlight->rect.x -= geo.x_advance;
         current_menu->highlight_position--;
         current_entry = current_entry->previous;
@@ -700,20 +712,22 @@ static void move_left()
         }
 
         calculate_button_geometry(current_menu->root_entry, (int) buttons);
-        if (config.highlight)
+        if (config.highlight && !config.tv_layout)
             highlight->rect.x = current_entry->icon_rect.x - config.highlight_hpadding;
         current_menu->highlight_position = buttons - 1;
     }
-    navigation_moved(previous);
+    navigation_moved(previous, previous_card, current_menu->page == previous_page ? 0 : -1);
 }
 
 // A function to move the selection right when clicked by the user
 static void move_right()
 {
     Entry *previous = current_entry;
+    SDL_Rect previous_card = previous->card_rect;
+    unsigned int previous_page = current_menu->page;
     // If we are not in the rightmost position, move highlight right
     if ((int) current_menu->highlight_position < (geo.num_buttons - 1)) {
-        if (config.highlight)
+        if (config.highlight && !config.tv_layout)
             highlight->rect.x += geo.x_advance;
         current_menu->highlight_position++;
         current_entry = current_entry->next;
@@ -728,7 +742,7 @@ static void move_right()
         current_entry = current_entry->next;
         current_menu->root_entry = current_entry;
         calculate_button_geometry(current_menu->root_entry, (int) buttons);
-        if (config.highlight)
+        if (config.highlight && !config.tv_layout)
             highlight->rect.x = current_entry->icon_rect.x - config.highlight_hpadding;
         current_menu->page++;
         current_menu->highlight_position = 0;
@@ -740,11 +754,11 @@ static void move_right()
         current_menu->root_entry = current_entry;
         current_menu->highlight_position = 0;
         current_menu->page = 0;
-        if (config.highlight)
+        if (config.highlight && !config.tv_layout)
             highlight->rect.x = current_entry->icon_rect.x - config.highlight_hpadding;
         calculate_button_geometry(current_menu->root_entry, (int) MIN(current_menu->num_entries, config.max_buttons));
     }
-    navigation_moved(previous);
+    navigation_moved(previous, previous_card, current_menu->page == previous_page ? 0 : 1);
 }
 
 // A function to load a submenu
@@ -787,8 +801,13 @@ static void draw_screen()
                 SDL_RenderCopy(renderer, clk->date_texture, NULL, &clk->date_rect);
         }
 
+        // Draw weather on the default menu, opposite the clock.
+        if (current_menu == default_menu)
+            draw_weather(renderer, geo.screen_width, geo.screen_height,
+                config.clock_enabled && config.clock_alignment == ALIGNMENT_LEFT);
+
         // Draw highlight
-        if (config.highlight)
+        if (config.highlight && !config.tv_layout)
             SDL_RenderCopy(renderer,
                 highlight->texture,
                 NULL,
@@ -796,16 +815,28 @@ static void draw_screen()
             );
 
         // Draw buttons
+        int slide = config.tv_layout ?
+            draw_tv_row(renderer, current_menu->root_entry, current_entry, geo.num_buttons) : 0;
         Entry *entry = current_menu->root_entry;
         SDL_Texture *icon;
         for (int i = 0; i < geo.num_buttons; i++) {
             icon = (entry->icon_selected != NULL && i == (int) current_menu->highlight_position) ? entry->icon_selected : entry->icon;
             SDL_Rect icon_rect = navigation_icon_rect(entry);
-            SDL_RenderCopy(renderer, icon, NULL, &icon_rect);
-            if (config.titles_enabled)
-                SDL_RenderCopy(renderer, entry->title_texture, NULL, &entry->text_rect);
+            icon_rect.x += slide;
+            if (config.tv_layout)
+                icon_rect = fit_tv_texture(icon, icon_rect);
+            if (icon != NULL)
+                SDL_RenderCopy(renderer, icon, NULL, &icon_rect);
+            if (config.titles_enabled && entry->title_texture != NULL) {
+                SDL_Rect title = entry->text_rect;
+                title.x += slide;
+                SDL_RenderCopy(renderer, entry->title_texture, NULL, &title);
+            }
             entry = entry-> next;
         }
+
+        if (config.tv_layout)
+            SDL_RenderSetClipRect(renderer, NULL);
 
         // Draw screensaver
         if (state.screensaver_active)
@@ -871,6 +902,7 @@ static void execute_command(const char *command)
     else {
         if (start_process(cmd, true)) {
             state.application_launching = true;
+            redraw_requested = true;
             ticks.application_launched = SDL_GetTicks();
             log_debug("Waiting for focus handoff (timeout %u ms)",
                 (unsigned)config.application_timeout);
@@ -1007,7 +1039,6 @@ static void poll_gamepad()
                 else if (i->type == TYPE_AXIS_NEG)
                     value_multiplier = -1;
                 if (value_multiplier*SDL_GameControllerGetAxis(gamepad->controller, i->index) > GAMEPAD_DEADZONE) {
-                    i->repeat++;
                     pressed = true;
                     break;
                 }
@@ -1016,27 +1047,23 @@ static void poll_gamepad()
             // Check buttons
             else if (i->type == TYPE_BUTTON) {
                 if (SDL_GameControllerGetButton(gamepad->controller, i->index)) {
-                    i->repeat++;
                     pressed = true;
                     break;
                 }
             }
         }
         if (!pressed) {
-            i->repeat = 0;
+            i->held = false;
             continue;
         }
 
-        // Execute command if first press or valid repeat
-        if (i->repeat == 1) {
-            log_debug("Gamepad %s detected", i->label);
+        if (!i->held || SDL_TICKS_PASSED(ticks.main, i->repeat_at)) {
+            if (!i->held)
+                log_debug("Gamepad %s detected", i->label);
+            i->repeat_at = ticks.main + (i->held ? GAMEPAD_REPEAT_INTERVAL : GAMEPAD_REPEAT_DELAY);
+            i->held = true;
             ticks.last_input = ticks.main;
             execute_command(i->cmd);
-        }
-        else if (i->repeat == delay_period) {
-            ticks.last_input = ticks.main;
-            execute_command(i->cmd);
-            i->repeat -= repeat_period;
         }
     }
 }
@@ -1055,6 +1082,7 @@ static void update_screensaver()
 
         // Transition the screen to dark
         if (state.screensaver_transition) {
+            redraw_requested = true;
             screensaver->alpha += screensaver->transition_change_rate;
             if (screensaver->alpha >= screensaver->alpha_end_value) {
                 SDL_SetTextureAlphaMod(screensaver->texture, (Uint8) screensaver->alpha_end_value);
@@ -1070,6 +1098,7 @@ static void update_screensaver()
             screensaver->alpha = 0.0f;
             state.screensaver_active = false;
             state.screensaver_transition = false;
+            redraw_requested = true;
             if (background_rotates()) {
                 state.slideshow_paused = false;
                 
@@ -1082,14 +1111,14 @@ static void update_screensaver()
 }
 
 // A function to update the clock display
-static void update_clock(void)
+static bool update_clock(void)
 {
     if (ticks.main - ticks.clock_update <= CLOCK_UPDATE_PERIOD)
-        return;
+        return false;
     ticks.clock_update = ticks.main;
     get_time(clk);
     if (!clk->render_time)
-        return;
+        return false;
 
     render_clock(clk);
     SDL_Texture *time = load_texture(clk->time_surface);
@@ -1108,6 +1137,7 @@ static void update_clock(void)
     }
     clk->render_time = false;
     clk->render_date = false;
+    return true;
 }
 
 static inline void pre_launch()
@@ -1116,7 +1146,7 @@ static inline void pre_launch()
         log_debug("Releasing gamepads during application handoff");
         disconnect_gamepad(-1, true, false);
         for (GamepadControl *control = gamepad_controls; control != NULL; control = control->next)
-            control->repeat = 0;
+            control->held = false;
     }
 
 // Initialize exit hotkey for Windows
@@ -1133,6 +1163,7 @@ static inline void post_launch()
     ticks.last_input = ticks.main;
 
     // Post-application updates
+    redraw_requested = true;
     if (config.gamepad_enabled)
         connect_gamepad(-1, true, false);
     if (config.clock_enabled)
@@ -1208,10 +1239,15 @@ int main(int argc, char *argv[])
     init_sdl_image();
     init_sdl_ttf();
     validate_settings(&geo);
+    if (config.tv_layout)
+        size_tv_row(&geo);
     
     // Initialize Nanosvg, create window and renderer
     init_svg();
     create_window();
+    if (config.tv_layout && !init_tv_ui())
+        log_fatal("Could not create TV layout textures: %s", SDL_GetError());
+    init_weather(title_info.font);
 
     // Initialize timing
     ticks.main = SDL_GetTicks();
@@ -1245,7 +1281,7 @@ int main(int argc, char *argv[])
     }
     
     // Render highlight
-    if (config.highlight) {
+    if (config.highlight && !config.tv_layout) {
         int button_height = config.icon_size + config.title_padding + geo.font_height;
         highlight = malloc(sizeof(Highlight));
         highlight->texture = render_highlight(config.icon_size + 2*config.highlight_hpadding,
@@ -1342,10 +1378,12 @@ int main(int argc, char *argv[])
 
                 case SDL_RENDER_TARGETS_RESET:
                 case SDL_RENDER_DEVICE_RESET:
+                    redraw_requested = true;
                     log_debug("SDL renderer reset (event %u)", (unsigned)event.type);
                     break;
 
                 case SDL_WINDOWEVENT:
+                    redraw_requested = true;
                     if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
                         log_debug("Lost keyboard focus (launching=%i, running=%i)",
                             state.application_launching, state.application_running);
@@ -1400,11 +1438,13 @@ int main(int argc, char *argv[])
                 poll_gamepad();
             if (config.background_mode == BACKGROUND_IMAGE ||
                 background_rotates())
-                update_background(renderer, ticks.main, state.slideshow_paused);
+                redraw_requested |= update_background(renderer, ticks.main, state.slideshow_paused);
             if (config.screensaver_enabled)
                 update_screensaver();
             if (config.clock_enabled)
-                update_clock();
+                redraw_requested |= update_clock();
+            if (current_menu == default_menu)
+                redraw_requested |= update_weather(ticks.main);
         }
         if (state.application_launching &&
         SDL_GetTicks() - ticks.application_launched >= config.application_timeout) {
@@ -1413,13 +1453,18 @@ int main(int argc, char *argv[])
             debug_foreground_window();
 #endif
             state.application_launching = false;
+            redraw_requested = true;
             if (config.on_launch == ON_LAUNCH_BLANK)
                 set_draw_color();
         }
         if (state.application_running)
             SDL_Delay(APPLICATION_WAIT_PERIOD);
-        else
+        else if (!config.tv_layout || redraw_requested || tv_motion_active() || navigation_entry != NULL) {
+            redraw_requested = false;
             draw_screen();
+        }
+        else
+            SDL_Delay(8);
     }
     quit(EXIT_SUCCESS);
 }

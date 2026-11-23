@@ -391,17 +391,17 @@ void init_background(SDL_Renderer *renderer)
     background.finished = !start_background_worker();
 }
 
-void update_background(SDL_Renderer *renderer, Uint32 now, bool paused)
+bool update_background(SDL_Renderer *renderer, Uint32 now, bool paused)
 {
     if (background.finished || paused)
-        return;
+        return false;
 
     if (background.incoming != NULL) {
         Uint32 elapsed = now - background.fade_started_at;
         if (elapsed < config.slideshow_transition_time) {
             Uint8 opacity = (Uint8)(255u * elapsed / config.slideshow_transition_time);
             SDL_SetTextureAlphaMod(background.incoming, opacity);
-            return;
+            return true;
         }
 
         SDL_SetTextureAlphaMod(background.incoming, 255);
@@ -410,17 +410,17 @@ void update_background(SDL_Renderer *renderer, Uint32 now, bool paused)
         background.incoming = NULL;
         background.shown_at = now;
         background.finished = !have_another_background();
-        return;
+        return true;
     }
 
     bool due = background.current == NULL || now - background.shown_at >= config.slideshow_image_duration;
     if (background.worker == NULL) {
         if (!start_background_worker())
             background.finished = true;
-        return;
+        return false;
     }
     if (!due || !SDL_AtomicGet(&background.ready))
-        return;
+        return false;
 
     SDL_WaitThread(background.worker, NULL);
     background.worker = NULL;
@@ -445,7 +445,7 @@ void update_background(SDL_Renderer *renderer, Uint32 now, bool paused)
             background.shown_at = now;
             background.finished = !have_another_background();
         }
-        return;
+        return false;
     }
 
     // Only advance the layout and recent photo set after a successful texture upload.
@@ -480,6 +480,7 @@ void update_background(SDL_Renderer *renderer, Uint32 now, bool paused)
         else if (config.background_mode == BACKGROUND_SLIDESHOW)
             log_debug("Displayed a slideshow photo from a catalog of %i files", background.files.count);
     }
+    return true;
 }
 
 void draw_background(SDL_Renderer *renderer)

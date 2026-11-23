@@ -21,6 +21,7 @@ title: Configuration
 6. [Hotkeys](#hotkeys)
 7. [Gamepad Controls](#gamepad-controls)
 8. [Transparent Backgrounds](#transparent-backgrounds)
+9. [Weather](#weather)
 
 ## Overview
 Flex Launcher uses an [INI file](https://en.wikipedia.org/wiki/INI_file) to configure settings and menus. The INI file consists of sections enclosed in square brackets, and in each section there are entries which consist of a key and a value. Example:
@@ -218,6 +219,7 @@ The settings in this section define the geometric layout of the launcher.
 - [MaxButtons](#maxbuttons)
 - [IconSize](#iconsize)
 - [IconSpacing](#iconspacing)
+- [Style](#style)
 - [VCenter](#vcenter)
 - [NavigationPop and NavigationSound](#navigationpop-and-navigationsound)
 
@@ -235,6 +237,10 @@ Default: 256
 Distance between the menu entry icons, in pixels or percent of the screen width.
 
 Default: 5%
+
+##### Style
+
+Set `Style=TV` in `[Layout]` for a lower row of TV-sized cards, aspect-preserving logos, a dark gradient over the background, and animated focus. It uses existing entries, titles, navigation mappings, and `MaxButtons`. The card row sets its own spacing and bottom margin. `IconSize` limits logo size inside the cards, and `[Highlight] Enabled` controls the focus border. The default `Style=Classic` uses the original layout settings, including `VCenter`.
 
 ##### VCenter
 Defines the vertical centering of the menu entries in percent of the screen height. A value of 50% will cause the buttons to be centered halfway in the screen. Increasing the value will lower the buttons, and lowering it will raise them.
@@ -554,6 +560,21 @@ Defines the order of the month and day in the date. Possible values: "Little", "
 Defines whether the date format should include the abbreviated weekday in your system locale. This setting is a boolean "true" or "false"
 
 Default: true
+
+## Weather
+
+Add a `[Weather]` section to show current temperature and conditions on the home menu. The widget appears opposite the clock when the clock is enabled.
+
+```ini
+[Weather]
+Enabled=true
+Location=London
+Latitude=51.5074
+Longitude=-0.1278
+Units=Celsius
+```
+
+Replace the example coordinates and optional display name with your location. Use decimal coordinates and set `Units` to `Celsius` or `Fahrenheit`. The widget is disabled by default. When enabled, it sends the configured coordinates over HTTPS to [Open-Meteo](https://open-meteo.com/) about every 20 minutes. It keeps the last known reading when a refresh fails. Windows uses WinHTTP. Linux builds with libcurl development files can also enable the widget.
 
 ## Screensaver
 Flex Launcher contains a screensaver feature, which will dim the screen after the input has been idle for the specified amount of time. Here are the settings that control the behavior of the screensaver

@@ -154,6 +154,7 @@ typedef struct entry {
     SDL_Texture    *icon;
     SDL_Texture    *icon_selected;
     SDL_Rect       icon_rect;
+    SDL_Rect       card_rect;
     SDL_Texture    *title_texture;
     SDL_Rect       text_rect;
     int            title_offset;
@@ -187,7 +188,8 @@ typedef struct gamepad {
 typedef struct gamepad_control {
     ControlType            type;
     int                    index;
-    Uint32                 repeat;
+    Uint32                 repeat_at;
+    bool                   held;
     const char             *label;
     char                   *cmd;
     struct gamepad_control *next;
@@ -240,6 +242,14 @@ typedef struct {
     SDL_Texture *texture;
 } Screensaver;
 
+typedef struct {
+    bool enabled;
+    bool fahrenheit;
+    double latitude;
+    double longitude;
+    char location[96];
+} WeatherSettings;
+
 // Configuration settings
 typedef struct {
     char *default_menu;
@@ -281,6 +291,7 @@ typedef struct {
     int highlight_vpadding;
     int highlight_hpadding;
     char vcenter[PERCENT_MAX_CHARS];
+    bool tv_layout;
     bool navigation_pop;
     bool navigation_sound;
     bool scroll_indicators;
@@ -306,6 +317,7 @@ typedef struct {
     char *exe_path;
     Menu *first_menu;
     size_t num_menus;
+    WeatherSettings weather;
     bool clock_enabled;
     bool clock_show_date;
     Alignment clock_alignment;

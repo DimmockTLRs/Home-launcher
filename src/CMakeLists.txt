@@ -4,6 +4,10 @@ set(SOURCES
   launcher.h
   background.c
   background.h
+  tv_ui.c
+  tv_ui.h
+  weather.c
+  weather.h
   util.c
   util.h
   image.c
@@ -30,6 +34,11 @@ add_subdirectory("platform")
 target_link_libraries(${EXECUTABLE_TITLE} platform)
 if (UNIX)
   target_link_libraries(${EXECUTABLE_TITLE} PkgConfig::SDL2 PkgConfig::SDL2_IMAGE PkgConfig::SDL2_TTF PkgConfig::INIH m)
+  find_package(CURL QUIET)
+  if (TARGET CURL::libcurl)
+    target_link_libraries(${EXECUTABLE_TITLE} CURL::libcurl)
+    target_compile_definitions(${EXECUTABLE_TITLE} PRIVATE HAVE_WEATHER_CURL)
+  endif ()
 else ()
   target_link_libraries(${EXECUTABLE_TITLE} 
   $<TARGET_NAME_IF_EXISTS:SDL2::SDL2main>
