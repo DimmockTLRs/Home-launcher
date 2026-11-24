@@ -48,6 +48,9 @@
 #define SCMD_EXIT ":exit"
 #define SCMD_LEFT ":left"
 #define SCMD_RIGHT ":right"
+#define SCMD_UP ":up"
+#define SCMD_DOWN ":down"
+#define SCMD_SETTINGS ":settings"
 #define SCMD_HOME ":home"
 #define SCMD_BACK ":back"
 #define SCMD_QUIT ":quit"
@@ -192,6 +195,7 @@ typedef struct gamepad_control {
     int                    index;
     Uint32                 repeat_at;
     bool                   held;
+    bool                   settings_latched;
     const char             *label;
     char                   *cmd;
     struct gamepad_control *next;

@@ -87,6 +87,19 @@ void make_window_transparent()
     );
 }
 
+void restore_opaque_window(void)
+{
+    HWND hwnd = wm_info.info.win.window;
+    LONG_PTR style = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+    SetLastError(ERROR_SUCCESS);
+    if (SetWindowLongPtr(hwnd, GWL_EXSTYLE, style & ~WS_EX_LAYERED) == 0 &&
+        GetLastError() != ERROR_SUCCESS) {
+        log_error("Could not remove the transparent window style; restart to fully apply the change");
+        return;
+    }
+    RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+}
+
 // When the window is transparent, we need to hide the cursor behind the non-transparent icon
 void hide_cursor(Entry *entry)
 {

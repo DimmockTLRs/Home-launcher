@@ -6,6 +6,7 @@
 
 bool background_rotates(void);
 void init_background(SDL_Renderer *renderer);
+void reload_background(SDL_Renderer *renderer);
 bool update_background(SDL_Renderer *renderer, Uint32 now, bool paused);
 void draw_background(SDL_Renderer *renderer);
 void restart_background_interval(Uint32 now);

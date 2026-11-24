@@ -12,6 +12,8 @@
 #include <launcher_config.h>
 #include "image.h"
 #include "background.h"
+#include "config_save.h"
+#include "settings_ui.h"
 #include "tv_ui.h"
 #include "weather.h"
 #include "util.h"
@@ -188,6 +190,119 @@ Geometry geo;
 Uint32 refresh_period;
 static bool redraw_requested = true;
 
+
+static char *config_file_path;
+static Entry *settings_entry;
+static SDL_Rect settings_card_bounds;
+static bool settings_key_latched[SDL_NUM_SCANCODES];
+static struct {
+    SDL_Thread *thread;
+    SDL_atomic_t ready;
+    BackgroundSettings before;
+    BackgroundSettings after;
+    bool saved;
+    char error[256];
+} settings_save;
+
+void request_launcher_redraw(void)
+{
+    redraw_requested = true;
+}
+
+static int save_settings_worker(void *unused)
+{
+    (void)unused;
+    settings_save.saved = save_background_config(config_file_path, &settings_save.after,
+        &settings_save.before, settings_save.error, sizeof(settings_save.error));
+    SDL_AtomicSet(&settings_save.ready, 1);
+    return 0;
+}
+
+bool apply_background_settings(const BackgroundSettings *settings, char *error, size_t error_size)
+{
+    if (settings_save.thread != NULL) {
+        SDL_strlcpy(error, "A save is already in progress.", error_size);
+        return false;
+    }
+    settings_save.before = (BackgroundSettings){
+        .mode = config.background_mode,
+        .layout = config.collage_layout,
+        .image_duration = config.slideshow_image_duration,
+        .transition_time = config.slideshow_transition_time,
+    };
+    settings_save.after = *settings;
+    settings_save.error[0] = '\0';
+    SDL_AtomicSet(&settings_save.ready, 0);
+    settings_save.thread = SDL_CreateThread(save_settings_worker, "Save launcher settings", NULL);
+    if (settings_save.thread == NULL) {
+        SDL_strlcpy(error, "Could not start the settings save.", error_size);
+        return false;
+    }
+    return true;
+}
+
+static void finish_settings_save(void)
+{
+    if (settings_save.thread == NULL || !SDL_AtomicGet(&settings_save.ready))
+        return;
+    SDL_WaitThread(settings_save.thread, NULL);
+    settings_save.thread = NULL;
+    if (settings_save.saved) {
+        const BackgroundSettings *after = &settings_save.after;
+        bool mode_changed = config.background_mode != after->mode;
+        bool layout_changed = config.collage_layout != after->layout;
+#ifdef _WIN32
+        if (mode_changed && config.background_mode == BACKGROUND_TRANSPARENT)
+            restore_opaque_window();
+#endif
+        config.background_mode = after->mode;
+        config.collage_layout = after->layout;
+        config.slideshow_image_duration = after->image_duration;
+        config.slideshow_transition_time = after->transition_time;
+        if (mode_changed || (layout_changed && after->mode == BACKGROUND_COLLAGE)) {
+            set_draw_color();
+            reload_background(renderer);
+        }
+        else
+            restart_background_interval(SDL_GetTicks());
+        log_debug("Background settings saved to %s", config_file_path);
+    }
+    settings_save_completed(settings_save.saved, settings_save.error);
+    request_launcher_redraw();
+}
+
+static void add_settings_card(Menu *menu)
+{
+    Entry *last = NULL;
+    for (Entry *entry = menu->first_entry; entry != NULL; entry = entry->next)
+        last = entry;
+
+    settings_entry = calloc(1, sizeof(*settings_entry));
+    if (settings_entry == NULL)
+        log_fatal("Could not allocate Settings card");
+    settings_entry->title = strdup("Settings");
+    settings_entry->icon_path = strdup("(built-in gear)");
+    settings_entry->cmd = strdup(SCMD_SETTINGS);
+    if (last == NULL)
+        menu->first_entry = settings_entry;
+    else
+        last->next = settings_entry;
+    settings_entry->previous = last;
+    menu->num_entries++;
+    if (settings_entry->title == NULL || settings_entry->icon_path == NULL || settings_entry->cmd == NULL)
+        log_fatal("Could not allocate Settings card text");
+}
+
+static SDL_Texture *settings_gear_icon(void)
+{
+    char gear[] =
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'>"
+        "<path fill='#E4EEFF' fill-rule='evenodd' d='"
+        "M40 7H56L59 19L66 22L77 15L88 26L81 37L84 44L96 47V57L84 60L81 67L88 78L77 89"
+        "L66 82L59 85L56 96H40L37 85L30 82L19 89L8 78L15 67L12 60L0 57V47L12 44L15 37L8 26"
+        "L19 15L30 22L37 19Z M65 52A17 17 0 1 0 31 52A17 17 0 1 0 65 52Z'/></svg>";
+    return rasterize_svg(gear, 192, 192, NULL);
+}
 
 #define NAVIGATION_POP_MS 200u
 #define NAVIGATION_AUDIO_RATE 48000
@@ -398,6 +513,9 @@ static void init_sdl_ttf()
 // A function to close subsystems and free memory before quitting
 static void cleanup()
 {
+    if (settings_save.thread != NULL)
+        SDL_WaitThread(settings_save.thread, NULL);
+    settings_quit();
     quit_background();
     quit_tv_ui();
     quit_weather();
@@ -432,6 +550,7 @@ static void cleanup()
         fclose(log_file);
 
     // Free dynamically allocated memory
+    free(config_file_path);
     free(config.default_menu);
     free(config.background_image);
     free(config.title_font_path);
@@ -493,6 +612,22 @@ static void handle_keypress(SDL_Keysym *key)
     if (config.debug)
         log_debug("Key %s (#%X) detected", SDL_GetKeyName(key->sym), key->sym);
 
+    if (settings_is_open()) {
+        switch (key->sym) {
+            case SDLK_UP: settings_command(SCMD_UP); break;
+            case SDLK_DOWN: settings_command(SCMD_DOWN); break;
+            case SDLK_LEFT: settings_command(SCMD_LEFT); break;
+            case SDLK_RIGHT: settings_command(SCMD_RIGHT); break;
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER:
+            case SDLK_SPACE: settings_command(SCMD_SELECT); break;
+            case SDLK_ESCAPE:
+            case SDLK_BACKSPACE: settings_command(SCMD_BACK); break;
+            default: break;
+        }
+        return;
+    }
+
     // Check default keys
     if (key->sym == SDLK_LEFT)
         move_left();
@@ -518,9 +653,11 @@ static void handle_keypress(SDL_Keysym *key)
         for (Hotkey *i = hotkeys; i != NULL; i = i->next) {
             if (key->sym == i->keycode) {
                 execute_command(i->cmd);
-                break;
+                return;
             }
         }
+        if (key->sym == SDLK_F1 && current_menu == default_menu)
+            execute_command(SCMD_SETTINGS);
     }
 }
 
@@ -662,7 +799,7 @@ static void render_buttons(Menu *menu)
     Entry *entry;
     int h;
     for (entry = menu->first_entry; entry != NULL; entry = entry->next) {
-        entry->icon = load_texture_from_file(entry->icon_path);
+        entry->icon = entry == settings_entry ? settings_gear_icon() : load_texture_from_file(entry->icon_path);
         entry->icon_selected = (entry->icon_selected_path != NULL) ? load_texture_from_file(entry->icon_selected_path) : NULL;
         if (config.titles_enabled) {
             entry->title_texture = render_text_texture(entry->title, &title_info, &entry->text_rect, &h);
@@ -777,9 +914,11 @@ static void load_back_menu(Menu *menu)
 // A function to update the screen with all visible textures
 static void draw_screen()
 {
-    // Draw background
+    settings_card_bounds = (SDL_Rect){0};
     SDL_RenderClear(renderer);
-    if (!(state.application_launching && config.on_launch == ON_LAUNCH_BLANK)) {
+    if (settings_is_open())
+        settings_draw(renderer);
+    else if (!(state.application_launching && config.on_launch == ON_LAUNCH_BLANK)) {
         draw_background(renderer);
 
         // Draw background overlay
@@ -825,6 +964,19 @@ static void draw_screen()
             icon_rect.x += slide;
             if (config.tv_layout)
                 icon_rect = fit_tv_texture(icon, icon_rect);
+            if (entry == settings_entry) {
+                if (config.tv_layout) {
+                    settings_card_bounds = entry->card_rect;
+                    settings_card_bounds.x += slide;
+                    SDL_Rect clip;
+                    SDL_RenderGetClipRect(renderer, &clip);
+                    SDL_IntersectRect(&settings_card_bounds, &clip, &settings_card_bounds);
+                }
+                else if (config.titles_enabled)
+                    SDL_UnionRect(&icon_rect, &entry->text_rect, &settings_card_bounds);
+                else
+                    settings_card_bounds = icon_rect;
+            }
             if (icon != NULL)
                 SDL_RenderCopy(renderer, icon, NULL, &icon_rect);
             if (config.titles_enabled && entry->title_texture != NULL) {
@@ -884,6 +1036,15 @@ static void execute_command(const char *command)
             move_right();
         else if (!strcmp(special_command, SCMD_SELECT))
             execute_command(current_entry->cmd);
+        else if (!strcmp(special_command, SCMD_SETTINGS)) {
+            if (current_menu == default_menu && !state.application_launching && !state.application_running &&
+                settings_open()) {
+                navigation_entry = NULL;
+                reset_tv_motion();
+                request_launcher_redraw();
+                log_debug("Opened launcher settings");
+            }
+        }
         else if (!strcmp(special_command, SCMD_HOME))
             load_menu(default_menu, false, true);
         else if (!strcmp(special_command, SCMD_BACK))
@@ -1054,18 +1215,48 @@ static void poll_gamepad()
         }
         if (!pressed) {
             i->held = false;
+            i->settings_latched = false;
             continue;
         }
 
+        if (i->settings_latched)
+            continue;
         if (!i->held || SDL_TICKS_PASSED(ticks.main, i->repeat_at)) {
             if (!i->held)
                 log_debug("Gamepad %s detected", i->label);
-            i->repeat_at = ticks.main + (i->held ? GAMEPAD_REPEAT_INTERVAL : GAMEPAD_REPEAT_DELAY);
+            bool editing = settings_is_open();
+            i->repeat_at = ticks.main + (i->held ?
+                (editing ? 110 : GAMEPAD_REPEAT_INTERVAL) : GAMEPAD_REPEAT_DELAY);
             i->held = true;
             ticks.last_input = ticks.main;
-            execute_command(i->cmd);
+            if (editing) {
+                if (!strcmp(i->cmd, SCMD_SELECT) || !strcmp(i->cmd, SCMD_BACK) ||
+                    !strcmp(i->cmd, SCMD_HOME) || !strcmp(i->cmd, SCMD_QUIT))
+                    i->settings_latched = true;
+                settings_command(i->cmd);
+            }
+            else {
+                execute_command(i->cmd);
+                if (settings_is_open())
+                    i->settings_latched = true;
+            }
         }
     }
+}
+
+static void settings_controller_button(Uint8 button)
+{
+    if (!settings_is_open() ||
+        (button != SDL_CONTROLLER_BUTTON_DPAD_UP && button != SDL_CONTROLLER_BUTTON_DPAD_DOWN))
+        return;
+
+    // The default mappings leave vertical D-pad directions unassigned.
+    for (const GamepadControl *control = gamepad_controls; control != NULL; control = control->next) {
+        if (control->type == TYPE_BUTTON && control->index == button)
+            return;
+    }
+    ticks.last_input = ticks.main;
+    settings_command(button == SDL_CONTROLLER_BUTTON_DPAD_UP ? SCMD_UP : SCMD_DOWN);
 }
 
 // A function to update the screensaver
@@ -1216,7 +1407,6 @@ void print_version(FILE *stream)
 int main(int argc, char *argv[]) 
 {
     int error;
-    char *config_file_path = NULL;
     config.exe_path = SDL_GetBasePath();
 
     // Handle command line arguments, find config file
@@ -1224,7 +1414,6 @@ int main(int argc, char *argv[])
 
     // Parse config file for settings and menu entries
     parse_config_file(config_file_path);
-    free(config_file_path);
 
     // Get default menu
     if (config.default_menu == NULL)
@@ -1232,6 +1421,7 @@ int main(int argc, char *argv[])
     default_menu = get_menu(config.default_menu);
     if (default_menu == NULL)
         log_fatal("Default menu %s not found in config file", config.default_menu);
+    add_settings_card(default_menu);
 
     // Initialize SDL, verify all settings are in their allowable range
     init_sdl();
@@ -1351,16 +1541,46 @@ int main(int argc, char *argv[])
                     quit(EXIT_SUCCESS);
                     break;
 
-                case SDL_KEYDOWN:
+                case SDL_KEYDOWN: {
+                    SDL_Scancode scancode = event.key.keysym.scancode;
+                    if (event.key.repeat && settings_key_latched[scancode])
+                        break;
                     ticks.last_input = ticks.main;
+                    bool editing = settings_is_open();
+                    SDL_Keycode key = event.key.keysym.sym;
                     handle_keypress(&event.key.keysym);
+                    settings_key_latched[scancode] = editing != settings_is_open() ||
+                        (editing && (key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE ||
+                            key == SDLK_ESCAPE || key == SDLK_BACKSPACE));
+                    break;
+                }
+
+                case SDL_KEYUP:
+                    settings_key_latched[event.key.keysym.scancode] = false;
                     break;
                 
-                case SDL_MOUSEBUTTONDOWN:
-                    if (config.mouse_select && event.button.button == SDL_BUTTON_LEFT) {
+                case SDL_MOUSEMOTION:
+                    if (settings_is_open()) {
                         ticks.last_input = ticks.main;
-                        execute_command(current_entry->cmd);
+                        settings_mouse(event.motion.x, event.motion.y, false);
                     }
+                    break;
+
+                case SDL_MOUSEBUTTONDOWN:
+                    if (event.button.button == SDL_BUTTON_LEFT) {
+                        ticks.last_input = ticks.main;
+                        SDL_Point point = {event.button.x, event.button.y};
+                        if (settings_is_open())
+                            settings_mouse(point.x, point.y, true);
+                        else if (SDL_PointInRect(&point, &settings_card_bounds))
+                            execute_command(SCMD_SETTINGS);
+                        else if (config.mouse_select)
+                            execute_command(current_entry->cmd);
+                    }
+                    break;
+
+                case SDL_CONTROLLERBUTTONDOWN:
+                    settings_controller_button(event.cbutton.button);
                     break;
 
                 case SDL_JOYDEVICEADDED:
@@ -1432,13 +1652,14 @@ int main(int argc, char *argv[])
             log_debug("Launcher restored after regaining focus");
         }
 
+        finish_settings_save();
+
         // Post-event loop updates
         if (!(state.application_running || state.application_launching)) {
             if (gamepads != NULL)
                 poll_gamepad();
-            if (config.background_mode == BACKGROUND_IMAGE ||
-                background_rotates())
-                redraw_requested |= update_background(renderer, ticks.main, state.slideshow_paused);
+            bool background_changed = update_background(renderer, ticks.main, state.slideshow_paused);
+            redraw_requested |= background_changed && !settings_is_open();
             if (config.screensaver_enabled)
                 update_screensaver();
             if (config.clock_enabled)

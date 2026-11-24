@@ -4,6 +4,10 @@ set(SOURCES
   launcher.h
   background.c
   background.h
+  config_save.c
+  config_save.h
+  settings_ui.c
+  settings_ui.h
   tv_ui.c
   tv_ui.h
   weather.c

@@ -28,5 +28,6 @@ void check_exit_hotkey(SDL_SysWMmsg *msg);
 void set_foreground_window(void);
 void debug_foreground_window(void);
 void make_window_transparent(void);
+void restore_opaque_window(void);
 void hide_cursor(Entry* entry);
 #endif

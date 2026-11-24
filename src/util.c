@@ -8,6 +8,7 @@
 #include <SDL.h>
 #include <SDL_syswm.h>
 #include "launcher.h"
+#include "config_save.h"
 #include <launcher_config.h>
 #include "util.h"
 #include "debug.h"
@@ -34,6 +35,28 @@ static const char *mode_settings[][6] = {
     {"Contain", "Cover", "Stretch", NULL, NULL},         // Photo Fit
     {"Auto", "Split", "Feature", "Grid", NULL}           // Collage Layout
 };
+
+static bool config_is_readable(const char *path)
+{
+    FILE *file = open_launcher_config(path);
+    if (file == NULL)
+        return false;
+    fclose(file);
+    return true;
+}
+
+static char *find_config_file(int count, const char *const *prefixes)
+{
+    char path[MAX_PATH_CHARS + 1];
+    for (int i = 0; i < count; i++) {
+        if (prefixes[i] == NULL)
+            continue;
+        join_paths(path, sizeof(path), 2, prefixes[i], FILENAME_DEFAULT_CONFIG);
+        if (config_is_readable(path))
+            return strdup(path);
+    }
+    return NULL;
+}
 
 // A function to handle the arguments from the command line
 void handle_arguments(int argc, char *argv[], char **config_file_path)
@@ -63,10 +86,12 @@ void handle_arguments(int argc, char *argv[], char **config_file_path)
                     break;
 
                 case 'c':
-                    if (file_exists(optarg))
-                        *config_file_path = strdup(optarg);
-                    else
+                    if (!config_is_readable(optarg))
                         log_fatal("Config file '%s' not found", optarg);
+                    free(*config_file_path);
+                    *config_file_path = strdup(optarg);
+                    if (*config_file_path == NULL)
+                        log_fatal("Could not store the config path");
                     break;
 
                 case 'd':
@@ -99,12 +124,12 @@ void handle_arguments(int argc, char *argv[], char **config_file_path)
         prefixes[1] = config.exe_path;
         prefixes[2] = join_paths(home_config_buffer, sizeof(home_config_buffer), 3, getenv("HOME"), ".config", EXECUTABLE_TITLE);
         prefixes[3] = PATH_CONFIG_SYSTEM;
-        *config_file_path = find_file(FILENAME_DEFAULT_CONFIG, 4, prefixes);
+        *config_file_path = find_config_file(4, prefixes);
 #else
         const char *prefixes[2];
         prefixes[0] = CURRENT_DIRECTORY;
         prefixes[1] = config.exe_path;
-        *config_file_path = find_file(FILENAME_DEFAULT_CONFIG, 2, prefixes);
+        *config_file_path = find_config_file(2, prefixes);
 #endif
 
         if (*config_file_path == NULL)
@@ -116,7 +141,7 @@ void handle_arguments(int argc, char *argv[], char **config_file_path)
 // A function to parse the config file and store the settings into the config struct
 void parse_config_file(const char *config_file_path)
 {
-    FILE *file = fopen(config_file_path, "r");
+    FILE *file = open_launcher_config(config_file_path);
     if (file == NULL)
         log_fatal("Could not open config file");
     int error = ini_parse_file(file, config_handler, NULL);
@@ -244,9 +269,9 @@ int config_handler(void *user, const char *section, const char *name, const char
                 config.slideshow_image_duration = slideshow_image_duration;
         }
         else if (MATCH(name, SETTING_SLIDESHOW_TRANSITION_TIME)) {
-            Uint32 slideshow_transition_time = (Uint32) (atof(value)*1000.0f);
-            if (slideshow_transition_time <= MAX_SLIDESHOW_TRANSITION_TIME)
-                config.slideshow_transition_time = slideshow_transition_time;
+            double milliseconds = atof(value) * 1000.0;
+            if (milliseconds >= 0 && milliseconds <= MAX_SLIDESHOW_TRANSITION_TIME)
+                config.slideshow_transition_time = (Uint32)(milliseconds + 0.5);
         }
         else if (MATCH(name, SETTING_CHROMA_KEY_COLOR))
             hex_to_color(value, &config.chroma_key_color);
@@ -479,7 +504,7 @@ int config_handler(void *user, const char *section, const char *name, const char
 
             // Create first entry in the menu if none exists
             if (menu->first_entry == NULL) {
-                menu->first_entry = malloc(sizeof(Entry));
+                menu->first_entry = calloc(1, sizeof(Entry));
                 entry = menu->first_entry;
                 entry->next = NULL;
             }
@@ -488,7 +513,7 @@ int config_handler(void *user, const char *section, const char *name, const char
             else {
                 previous_entry = entry;
                 entry = entry->next;
-                entry = malloc(sizeof(Entry));
+                entry = calloc(1, sizeof(Entry));
                 previous_entry->next = entry;
                 entry->next = NULL;
             }

@@ -14,7 +14,19 @@
 
 extern Config config;
 
-static struct {
+typedef struct {
+    ModeBackground mode;
+    CollageLayout layout;
+    PhotoFit fit;
+    int crop_x;
+    int crop_y;
+    SDL_Color color;
+    char *path;
+} BackgroundInput;
+
+typedef struct {
+    // Settings for this generation remain immutable until its worker has exited.
+    BackgroundInput input;
     PhotoList files;
     int *order;
     int current_index;
@@ -36,7 +48,10 @@ static struct {
     Uint32 shown_at;
     Uint32 fade_started_at;
     bool finished;
-} background = { .current_index = -1, .auto_panels = 3 };
+    bool reload_pending;
+} Background;
+
+static Background background = { .current_index = -1, .auto_panels = 3 };
 
 bool background_rotates(void)
 {
@@ -70,12 +85,12 @@ static void photo_rects(SDL_Rect *source, SDL_Rect *destination, PhotoFit fit)
     else if (fit == PHOTO_COVER) {
         if (source_ratio > destination_ratio) {
             int width = SDL_max(1, (int)(destination_ratio / destination->h));
-            source->x = (int)((Sint64)(source->w - width) * config.photo_crop_x / 100);
+            source->x = (int)((Sint64)(source->w - width) * background.input.crop_x / 100);
             source->w = width;
         }
         else {
             int height = SDL_max(1, (int)(source_ratio / destination->w));
-            source->y = (int)((Sint64)(source->h - height) * config.photo_crop_y / 100);
+            source->y = (int)((Sint64)(source->h - height) * background.input.crop_y / 100);
             source->h = height;
         }
     }
@@ -88,7 +103,7 @@ static SDL_Surface *new_photo_frame(void)
     SDL_Surface *frame = SDL_CreateRGBSurfaceWithFormat(0, background.width,
         background.height, 32, SDL_PIXELFORMAT_RGB888);
     if (frame != NULL) {
-        SDL_Color fill = config.background_color;
+        SDL_Color fill = background.input.color;
         if (SDL_FillRect(frame, NULL, SDL_MapRGB(frame->format, fill.r, fill.g, fill.b)) < 0) {
             SDL_FreeSurface(frame);
             return NULL;
@@ -106,14 +121,20 @@ static bool blit_photo(SDL_Surface *photo, SDL_Surface *frame, SDL_Rect panel, P
 
 static SDL_Surface *prepare_photo(const char *path)
 {
+    if (SDL_AtomicGet(&background.stop_requested))
+        return NULL;
     SDL_Surface *photo = IMG_Load(path);
     if (photo == NULL)
         return NULL;
 
+    if (SDL_AtomicGet(&background.stop_requested)) {
+        SDL_FreeSurface(photo);
+        return NULL;
+    }
     SDL_Surface *frame = new_photo_frame();
     if (frame != NULL) {
         SDL_Rect panel = { 0, 0, frame->w, frame->h };
-        if (!blit_photo(photo, frame, panel, config.photo_fit)) {
+        if (!blit_photo(photo, frame, panel, background.input.fit)) {
             SDL_FreeSurface(frame);
             frame = NULL;
         }
@@ -126,7 +147,7 @@ static bool init_photo_catalog(void)
 {
     if (background.order != NULL)
         return true;
-    if (!scan_slideshow_directory(&background.files, config.slideshow_directory,
+    if (!scan_slideshow_directory(&background.files, background.input.path,
             &background.stop_requested) || background.files.count == 0)
         return false;
 
@@ -169,7 +190,7 @@ static SDL_Surface *next_slideshow_photo(void)
 
 static int fixed_panel_count(void)
 {
-    switch (config.collage_layout) {
+    switch (background.input.layout) {
         case COLLAGE_SPLIT:   return 2;
         case COLLAGE_FEATURE: return 3;
         case COLLAGE_GRID:    return 4;
@@ -284,6 +305,10 @@ static int fill_collage(SDL_Surface *frame, int count, int selected[])
                 skip_photo(index);
                 continue;
             }
+            if (SDL_AtomicGet(&background.stop_requested)) {
+                SDL_FreeSurface(photo);
+                return filled;
+            }
             int panel = best_panel(photo, panels, count, occupied);
             bool drawn = blit_photo(photo, frame, panels[panel], count == 1 ? PHOTO_CONTAIN : PHOTO_COVER);
             SDL_FreeSurface(photo);
@@ -339,10 +364,10 @@ static SDL_Surface *next_collage(void)
 static int prepare_background(void *unused)
 {
     (void)unused;
-    if (config.background_mode == BACKGROUND_IMAGE)
-        background.prepared = prepare_photo(config.background_image);
+    if (background.input.mode == BACKGROUND_IMAGE)
+        background.prepared = prepare_photo(background.input.path);
     else if (init_photo_catalog()) {
-        background.prepared = config.background_mode == BACKGROUND_COLLAGE ?
+        background.prepared = background.input.mode == BACKGROUND_COLLAGE ?
             next_collage() : next_slideshow_photo();
     }
     SDL_AtomicSet(&background.ready, 1);
@@ -360,12 +385,12 @@ static bool start_background_worker(void)
 
 void init_background(SDL_Renderer *renderer)
 {
+    background.finished = true;
     if (!background_rotates() && config.background_mode != BACKGROUND_IMAGE)
         return;
     const char *path = background_path();
     if (path == NULL || path[0] == '\0') {
         log_error("No path configured for the photo background; using the background color");
-        background.finished = true;
         return;
     }
 
@@ -374,7 +399,6 @@ void init_background(SDL_Renderer *renderer)
     if (SDL_GetRendererOutputSize(renderer, &width, &height) < 0 ||
         width <= 0 || height <= 0 || SDL_GetRendererInfo(renderer, &info) < 0) {
         log_error("Could not size the photo background: %s", SDL_GetError());
-        background.finished = true;
         return;
     }
     int max_width = width >= height ? MAX_PHOTO_LONG_EDGE : MAX_PHOTO_SHORT_EDGE;
@@ -388,11 +412,57 @@ void init_background(SDL_Renderer *renderer)
     background.height = SDL_max(1, (int)(height * scale + 0.5));
     log_debug("Photo background canvas: %i x %i", background.width, background.height);
 
+    background.input = (BackgroundInput){
+        .mode = config.background_mode,
+        .layout = config.collage_layout,
+        .fit = config.photo_fit,
+        .crop_x = config.photo_crop_x,
+        .crop_y = config.photo_crop_y,
+        .color = config.background_color,
+        .path = SDL_strdup(path),
+    };
+    if (background.input.path == NULL) {
+        log_error("Could not copy the background path; using the background color");
+        return;
+    }
     background.finished = !start_background_worker();
+}
+
+static void destroy_background_textures(void)
+{
+    if (background.current != NULL)
+        SDL_DestroyTexture(background.current);
+    if (background.incoming != NULL)
+        SDL_DestroyTexture(background.incoming);
+    background.current = NULL;
+    background.incoming = NULL;
+}
+
+static bool finish_background_reload(SDL_Renderer *renderer)
+{
+    if (background.worker != NULL && !SDL_AtomicGet(&background.ready))
+        return false;
+
+    quit_background();
+    init_background(renderer);
+    return true;
+}
+
+void reload_background(SDL_Renderer *renderer)
+{
+    destroy_background_textures();
+    background.reload_pending = true;
+    if (background.worker != NULL)
+        SDL_AtomicSet(&background.stop_requested, 1);
+    finish_background_reload(renderer);
 }
 
 bool update_background(SDL_Renderer *renderer, Uint32 now, bool paused)
 {
+    // A reload may need retiring even when the replacement mode is solid or
+    // slideshow rotation is paused.
+    if (background.reload_pending)
+        return finish_background_reload(renderer);
     if (background.finished || paused)
         return false;
 
@@ -432,7 +502,7 @@ bool update_background(SDL_Renderer *renderer, Uint32 now, bool paused)
     background.prepared = NULL;
 
     if (frame == NULL) {
-        const char *path = background_path();
+        const char *path = background.input.path;
         if (background.current == NULL) {
             log_error("Could not prepare a photo background from '%s'; using the background color", path);
             background.finished = true;
@@ -503,10 +573,11 @@ void quit_background(void)
         SDL_WaitThread(background.worker, NULL);
     }
     SDL_FreeSurface(background.prepared);
-    SDL_DestroyTexture(background.current);
-    SDL_DestroyTexture(background.incoming);
+    destroy_background_textures();
     for (int i = 0; i < background.files.count; i++)
         free(background.files.paths[i]);
     free(background.files.paths);
     free(background.order);
+    SDL_free(background.input.path);
+    background = (Background){ .current_index = -1, .auto_panels = 3, .finished = true };
 }

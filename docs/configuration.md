@@ -40,6 +40,14 @@ A line can be commented out by using the # character at the beginning of the lin
 - Several settings allow for values to be specified in pixels *or* as a percentage of another value. In this case, if no percent sign is detected it will be interpreted as pixels, and if the percent sign is present, than it will be interpreted as a percent value e.g. "5" means 5 pixels and "5%" means 5 percent.
 - Shell variable expansion is generally not supported, e.g. you cannot use the ~ character to refer to your home directory. The exception is for commands, since those are passed through to your system shell.
 
+## On-screen settings
+
+Open the gear card at the end of the home menu to edit background settings. You can also press F1 on the home menu if you have no F1 hotkey. Use Up and Down to move, Left and Right to adjust, and Enter or your controller's Select button to choose an action. You can also click the controls. Back or Escape discards unsaved changes.
+
+The Backgrounds screen can switch among Solid colour, Single image, Slideshow and Collage. It also controls the collage layout, photo duration and fade duration. Single image and folder-based modes use the existing paths in `Image` and `SlideshowDirectory`. Photo and folder selection is planned for the next stage.
+
+Choose **Save and return** to apply the settings and update the INI file used at launch, including any file specified with `--config`. The save preserves other settings, comments and custom entries, and keeps the previous file beside it as `config.ini.bak` (or the equivalent for a custom filename). If the file cannot be written, the screen keeps your draft and shows the error.
+
 ## Settings
 The following sections contain settings that control the look and behavior of the launcher:
 - [General](#general)
