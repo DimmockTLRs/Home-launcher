@@ -916,8 +916,11 @@ static void draw_screen()
 {
     settings_card_bounds = (SDL_Rect){0};
     SDL_RenderClear(renderer);
-    if (settings_is_open())
+    if (settings_is_open()) {
         settings_draw(renderer);
+        if (state.screensaver_active)
+            SDL_RenderCopy(renderer, screensaver->texture, NULL, NULL);
+    }
     else if (!(state.application_launching && config.on_launch == ON_LAUNCH_BLANK)) {
         draw_background(renderer);
 
@@ -1290,13 +1293,11 @@ static void update_screensaver()
             state.screensaver_active = false;
             state.screensaver_transition = false;
             redraw_requested = true;
-            if (background_rotates()) {
-                state.slideshow_paused = false;
-                
-                // Reset the slideshow time so we don't have a transition immediately 
-                // after coming out of screensaver mode
+            state.slideshow_paused = false;
+
+            // Give the visible background a full interval after waking.
+            if (background_rotates())
                 restart_background_interval(ticks.main);
-            }
         }
     }
 }
