@@ -13,6 +13,8 @@
 #include "image.h"
 #include "background.h"
 #include "config_save.h"
+#include "photo_files.h"
+#include "photo_gallery.h"
 #include "settings_ui.h"
 #include "tv_ui.h"
 #include "weather.h"
@@ -200,6 +202,8 @@ static struct {
     SDL_atomic_t ready;
     BackgroundSettings before;
     BackgroundSettings after;
+    char *image_path;
+    char *folder_path;
     bool saved;
     char error[256];
 } settings_save;
@@ -218,10 +222,40 @@ static int save_settings_worker(void *unused)
     return 0;
 }
 
+static const char *configured_path(const char *path)
+{
+    return path != NULL ? path : "";
+}
+
+void refresh_launcher_background(const char *changed_folder)
+{
+    if (background_rotates() && same_photo_path(changed_folder, config.slideshow_directory)) {
+        reload_background(renderer);
+        request_launcher_redraw();
+    }
+}
+
+static void free_save_paths(void)
+{
+    free(settings_save.image_path);
+    free(settings_save.folder_path);
+    settings_save.image_path = NULL;
+    settings_save.folder_path = NULL;
+}
+
 bool apply_background_settings(const BackgroundSettings *settings, char *error, size_t error_size)
 {
     if (settings_save.thread != NULL) {
         SDL_strlcpy(error, "A save is already in progress.", error_size);
+        return false;
+    }
+    const char *image = configured_path(settings->image_path);
+    const char *folder = configured_path(settings->folder_path);
+    settings_save.image_path = *image ? strdup(image) : NULL;
+    settings_save.folder_path = *folder ? strdup(folder) : NULL;
+    if ((*image && settings_save.image_path == NULL) || (*folder && settings_save.folder_path == NULL)) {
+        free_save_paths();
+        SDL_strlcpy(error, "Could not store the selected photo paths.", error_size);
         return false;
     }
     settings_save.before = (BackgroundSettings){
@@ -229,12 +263,17 @@ bool apply_background_settings(const BackgroundSettings *settings, char *error, 
         .layout = config.collage_layout,
         .image_duration = config.slideshow_image_duration,
         .transition_time = config.slideshow_transition_time,
+        .image_path = config.background_image,
+        .folder_path = config.slideshow_directory,
     };
     settings_save.after = *settings;
+    settings_save.after.image_path = settings_save.image_path;
+    settings_save.after.folder_path = settings_save.folder_path;
     settings_save.error[0] = '\0';
     SDL_AtomicSet(&settings_save.ready, 0);
     settings_save.thread = SDL_CreateThread(save_settings_worker, "Save launcher settings", NULL);
     if (settings_save.thread == NULL) {
+        free_save_paths();
         SDL_strlcpy(error, "Could not start the settings save.", error_size);
         return false;
     }
@@ -251,6 +290,10 @@ static void finish_settings_save(void)
         const BackgroundSettings *after = &settings_save.after;
         bool mode_changed = config.background_mode != after->mode;
         bool layout_changed = config.collage_layout != after->layout;
+        bool image_changed = strcmp(configured_path(config.background_image),
+            configured_path(after->image_path)) != 0;
+        bool folder_changed = strcmp(configured_path(config.slideshow_directory),
+            configured_path(after->folder_path)) != 0;
 #ifdef _WIN32
         if (mode_changed && config.background_mode == BACKGROUND_TRANSPARENT)
             restore_opaque_window();
@@ -259,7 +302,15 @@ static void finish_settings_save(void)
         config.collage_layout = after->layout;
         config.slideshow_image_duration = after->image_duration;
         config.slideshow_transition_time = after->transition_time;
-        if (mode_changed || (layout_changed && after->mode == BACKGROUND_COLLAGE)) {
+        free(config.background_image);
+        free(config.slideshow_directory);
+        config.background_image = settings_save.image_path;
+        config.slideshow_directory = settings_save.folder_path;
+        settings_save.image_path = NULL;
+        settings_save.folder_path = NULL;
+        if (mode_changed || (layout_changed && after->mode == BACKGROUND_COLLAGE) ||
+            (image_changed && after->mode == BACKGROUND_IMAGE) ||
+            (folder_changed && background_rotates())) {
             set_draw_color();
             reload_background(renderer);
         }
@@ -267,6 +318,7 @@ static void finish_settings_save(void)
             restart_background_interval(SDL_GetTicks());
         log_debug("Background settings saved to %s", config_file_path);
     }
+    free_save_paths();
     settings_save_completed(settings_save.saved, settings_save.error);
     request_launcher_redraw();
 }
@@ -515,6 +567,8 @@ static void cleanup()
 {
     if (settings_save.thread != NULL)
         SDL_WaitThread(settings_save.thread, NULL);
+    free_save_paths();
+    quit_photo_gallery();
     settings_quit();
     quit_background();
     quit_tv_ui();
@@ -1623,7 +1677,7 @@ int main(int argc, char *argv[])
                         // Sometimes the launcher will lose focus on Windows when autostarting
                         // So if we lose the window focus within 10 seconds of the launcher starting
                         // we will grab back th Window focus. This is a bit of a hack
-                        else if (ticks.main - ticks.program_start < 10000)
+                        else if (!settings_is_open() && ticks.main - ticks.program_start < 10000)
                             set_foreground_window();
 #endif
                     }
@@ -1654,6 +1708,7 @@ int main(int argc, char *argv[])
         }
 
         finish_settings_save();
+        settings_pump();
 
         // Post-event loop updates
         if (!(state.application_running || state.application_launching)) {

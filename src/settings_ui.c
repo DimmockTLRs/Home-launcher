@@ -7,6 +7,7 @@
 #include "launcher.h"
 #include "config_save.h"
 #include "image.h"
+#include "photo_gallery.h"
 #include "settings_ui.h"
 #include "util.h"
 
@@ -23,6 +24,7 @@ typedef enum {
     ROW_TRANSITION,
     ROW_SAVE,
     ROW_BACK,
+    ROW_MANAGE,
     ROW_COUNT
 } SettingsRow;
 
@@ -58,6 +60,8 @@ static struct {
     TTF_Font *heading_font;
     BackgroundSettings original;
     BackgroundSettings draft;
+    char *image_path;
+    char *folder_path;
     SettingsText section;
     SettingsText title;
     SettingsText labels[ROW_SAVE];
@@ -66,6 +70,7 @@ static struct {
     SettingsText right;
     SettingsText save;
     SettingsText back;
+    SettingsText manage;
     SettingsText help;
     SettingsText notice;
     SDL_Texture *row;
@@ -146,7 +151,9 @@ static bool edited(void)
     return ui.draft.mode != ui.original.mode ||
         ui.draft.layout != ui.original.layout ||
         ui.draft.image_duration != ui.original.image_duration ||
-        ui.draft.transition_time != ui.original.transition_time;
+        ui.draft.transition_time != ui.original.transition_time ||
+        strcmp(ui.image_path != NULL ? ui.image_path : "", ui.original.image_path) != 0 ||
+        strcmp(ui.folder_path != NULL ? ui.folder_path : "", ui.original.folder_path) != 0;
 }
 
 static void set_notice(const char *message, SDL_Color color)
@@ -157,11 +164,11 @@ static void set_notice(const char *message, SDL_Color color)
 static void refresh_notice(void)
 {
     if (ui.draft.mode == BACKGROUND_IMAGE &&
-        (config.background_image == NULL || config.background_image[0] == '\0'))
-        set_notice("No single image path is configured. Set Image in config.ini to use this mode.", caution);
+        (ui.image_path == NULL || ui.image_path[0] == '\0'))
+        set_notice("Choose a single image in Manage photos.", caution);
     else if ((ui.draft.mode == BACKGROUND_SLIDESHOW || ui.draft.mode == BACKGROUND_COLLAGE) &&
-        (config.slideshow_directory == NULL || config.slideshow_directory[0] == '\0'))
-        set_notice("No photo folder is configured. Set SlideshowDirectory in config.ini to use this mode.", caution);
+        (ui.folder_path == NULL || ui.folder_path[0] == '\0'))
+        set_notice("Choose a photo folder in Manage photos.", caution);
     else
         set_notice(edited() ? "Save to apply your changes." : "", muted);
 }
@@ -199,6 +206,17 @@ bool settings_open(void)
         return true;
     if (geo.screen_width <= 0 || geo.screen_height <= 0 || title_info.font == NULL)
         return false;
+    const char *image = config.background_image != NULL ? config.background_image : "";
+    const char *folder = config.slideshow_directory != NULL ? config.slideshow_directory : "";
+    char *image_copy = strdup(image);
+    char *folder_copy = strdup(folder);
+    if (image_copy == NULL || folder_copy == NULL) {
+        free(image_copy);
+        free(folder_copy);
+        return false;
+    }
+    ui.image_path = image_copy;
+    ui.folder_path = folder_copy;
 
     ui.scale = SDL_min((double)geo.screen_width / 1920.0, (double)geo.screen_height / 1080.0);
     ui.origin_x = (geo.screen_width - scaled(1920)) / 2;
@@ -206,6 +224,7 @@ bool settings_open(void)
     for (int i = 0; i < ROW_SAVE; i++)
         ui.rows[i] = bounds(252, 262 + 112 * i, 1416, 96);
     ui.rows[ROW_BACK] = bounds(252, 826, 240, 76);
+    ui.rows[ROW_MANAGE] = bounds(520, 826, 348, 76);
     ui.rows[ROW_SAVE] = bounds(1320, 826, 348, 76);
 
     char font_dir[MAX_PATH_CHARS + 1];
@@ -227,7 +246,9 @@ bool settings_open(void)
         .mode = config.background_mode,
         .layout = config.collage_layout,
         .image_duration = config.slideshow_image_duration,
-        .transition_time = config.slideshow_transition_time
+        .transition_time = config.slideshow_transition_time,
+        .image_path = image,
+        .folder_path = folder
     };
     ui.draft = ui.original;
     set_text(&ui.section, ui.small_font, "Settings", muted);
@@ -236,7 +257,8 @@ bool settings_open(void)
     set_text(&ui.right, ui.body_font, "\xc2\xbb", accent);
     set_text(&ui.save, ui.body_font, "Save and return", light);
     set_text(&ui.back, ui.body_font, "Back", light);
-    set_text(&ui.help, ui.small_font, "Up / Down  Navigate     Left / Right  Adjust     Enter / A  Select     Esc / B  Back", muted);
+    set_text(&ui.manage, ui.body_font, "Manage photos", light);
+    set_text(&ui.help, ui.small_font, "Arrows  Navigate or adjust     Enter / A  Select     Esc / B  Back", muted);
     for (int i = 0; i < ROW_SAVE; i++) {
         set_text(&ui.labels[i], ui.body_font, labels[i], light);
         refresh_value(i);
@@ -300,12 +322,19 @@ static void activate(int direction)
         adjust(ui.selected, direction);
         return;
     }
+    if (ui.selected == ROW_MANAGE) {
+        open_photo_gallery(&ui.draft.mode, &ui.folder_path, &ui.image_path,
+            ui.heading_font, ui.body_font, ui.small_font);
+        return;
+    }
     if (ui.selected == ROW_BACK || !edited()) {
         close_settings();
         return;
     }
 
     char error[512] = {0};
+    ui.draft.image_path = ui.image_path;
+    ui.draft.folder_path = ui.folder_path;
     if (apply_background_settings(&ui.draft, error, sizeof(error))) {
         ui.saving = true;
         set_notice("Saving changes...", muted);
@@ -328,10 +357,23 @@ void settings_save_completed(bool success, const char *error)
     }
 }
 
+static void return_from_gallery(void)
+{
+    if (!photo_gallery_is_open()) {
+        refresh_value(ROW_MODE);
+        refresh_notice();
+    }
+}
+
 void settings_command(const char *command)
 {
     if (!ui.open || ui.saving || command == NULL)
         return;
+    if (photo_gallery_is_open()) {
+        photo_gallery_command(command);
+        return_from_gallery();
+        return;
+    }
 
     if (strcmp(command, SCMD_UP) == 0)
         ui.selected = (ui.selected + ROW_COUNT - 1) % ROW_COUNT;
@@ -341,8 +383,10 @@ void settings_command(const char *command)
         int direction = strcmp(command, SCMD_LEFT) == 0 ? -1 : 1;
         if (ui.selected < ROW_SAVE)
             adjust(ui.selected, direction);
-        else
+        else if (ui.selected == ROW_MANAGE)
             ui.selected = direction > 0 ? ROW_SAVE : ROW_BACK;
+        else if ((ui.selected == ROW_BACK && direction > 0) || (ui.selected == ROW_SAVE && direction < 0))
+            ui.selected = ROW_MANAGE;
     }
     else if (strcmp(command, SCMD_SELECT) == 0)
         activate(1);
@@ -358,6 +402,11 @@ void settings_mouse(int x, int y, bool click)
 {
     if (!ui.open || ui.saving)
         return;
+    if (photo_gallery_is_open()) {
+        photo_gallery_mouse(x, y, click);
+        return_from_gallery();
+        return;
+    }
     SDL_Point mouse = { x, y };
     for (int i = 0; i < ROW_COUNT; i++) {
         if (SDL_PointInRect(&mouse, &ui.rows[i])) {
@@ -372,6 +421,11 @@ void settings_mouse(int x, int y, bool click)
             return;
         }
     }
+}
+
+void settings_pump(void)
+{
+    pump_photo_gallery();
 }
 
 static void fill(SDL_Renderer *renderer, const SDL_Rect *rect, SDL_Color color)
@@ -400,6 +454,10 @@ void settings_draw(SDL_Renderer *renderer)
 {
     if (!ui.open)
         return;
+    if (photo_gallery_is_open()) {
+        draw_photo_gallery(renderer);
+        return;
+    }
 
     SDL_Color previous;
     SDL_GetRenderDrawColor(renderer, &previous.r, &previous.g, &previous.b, &previous.a);
@@ -426,6 +484,7 @@ void settings_draw(SDL_Renderer *renderer)
     }
     draw_text(renderer, &ui.notice, bounds(252, 721, 1416, 94), false);
     draw_action(renderer, ROW_BACK, &ui.back);
+    draw_action(renderer, ROW_MANAGE, &ui.manage);
     draw_action(renderer, ROW_SAVE, &ui.save);
     draw_text(renderer, &ui.help, bounds(252, 954, 1416, 60), false);
     SDL_SetRenderDrawColor(renderer, previous.r, previous.g, previous.b, previous.a);
@@ -436,6 +495,8 @@ void settings_quit(void)
     if (!ui.open)
         return;
 
+    free(ui.image_path);
+    free(ui.folder_path);
     if (ui.cursor_before >= 0)
         SDL_ShowCursor(ui.cursor_before);
     for (int i = 0; i < ROW_SAVE; i++) {
@@ -448,6 +509,7 @@ void settings_quit(void)
     SDL_DestroyTexture(ui.right.texture);
     SDL_DestroyTexture(ui.save.texture);
     SDL_DestroyTexture(ui.back.texture);
+    SDL_DestroyTexture(ui.manage.texture);
     SDL_DestroyTexture(ui.help.texture);
     SDL_DestroyTexture(ui.notice.texture);
     SDL_DestroyTexture(ui.row);

@@ -44,7 +44,13 @@ A line can be commented out by using the # character at the beginning of the lin
 
 Open the gear card at the end of the home menu to edit background settings. You can also press F1 on the home menu if you have no F1 hotkey. Use Up and Down to move, Left and Right to adjust, and Enter or your controller's Select button to choose an action. You can also click the controls. Back or Escape discards unsaved changes.
 
-The Backgrounds screen can switch among Solid colour, Single image, Slideshow and Collage. It also controls the collage layout, photo duration and fade duration. Single image and folder-based modes use the existing paths in `Image` and `SlideshowDirectory`. Photo and folder selection is planned for the next stage.
+The Backgrounds screen can switch among Solid colour, Single image, Slideshow and Collage. It also controls the collage layout, photo duration and fade duration.
+
+Open **Manage photos** to browse thumbnails for the current photo folder. On Windows, **Choose folder** opens a native folder picker. **Add photos** lets you select one or more JPEG, PNG or WebP files. Imports copy the originals into the displayed folder. A filename conflict gets a new name, and the original file is kept intact.
+
+Select a thumbnail to preview it and choose **Use as background** to set it as the Single image. **Remove photo** asks for confirmation before deleting the selected file from the displayed folder. To remove the configured single image, first choose and save another one. Imports and confirmed deletions take effect when the operation finishes. **Save and return** in Backgrounds saves the chosen folder, image and mode in the launcher config. Back from Backgrounds discards unsaved config changes.
+
+The gallery reads photos directly inside the selected folder and prepares only the visible page of thumbnails. On Linux, the gallery can browse a folder already configured in the INI. The native folder and file pickers are available in the Windows build.
 
 Choose **Save and return** to apply the settings and update the INI file used at launch, including any file specified with `--config`. The save preserves other settings, comments and custom entries, and keeps the previous file beside it as `config.ini.bak` (or the equivalent for a custom filename). If the file cannot be written, the screen keeps your draft and shows the error.
 

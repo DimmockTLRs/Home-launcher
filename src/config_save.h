@@ -7,6 +7,8 @@ typedef struct {
     CollageLayout layout;
     Uint32 image_duration;
     Uint32 transition_time;
+    const char *image_path;
+    const char *folder_path;
 } BackgroundSettings;
 
 FILE *open_launcher_config(const char *path);

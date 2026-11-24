@@ -8,6 +8,12 @@ set(SOURCES
   config_save.h
   settings_ui.c
   settings_ui.h
+  photo_gallery.c
+  photo_gallery.h
+  photo_jobs.c
+  photo_jobs.h
+  photo_files.c
+  photo_files.h
   tv_ui.c
   tv_ui.h
   weather.c
@@ -53,6 +59,8 @@ else ()
   ${GETOPT}
 	PowrProf
   winhttp
+  ole32
+  uuid
   )
   target_include_directories(${EXECUTABLE_TITLE} PUBLIC ${INIH_INCLUDE_DIR} ${GETOPT_INCLUDE_DIR})
 endif ()

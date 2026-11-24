@@ -23,7 +23,7 @@
 
 typedef struct {
     const char *key;
-    char value[20];
+    const char *value;
     bool changed;
     bool found;
     size_t start;
@@ -42,6 +42,16 @@ typedef struct {
     SettingEdit *edits;
     size_t edit_count;
 } ConfigScan;
+
+typedef enum {
+    EDIT_MODE,
+    EDIT_LAYOUT,
+    EDIT_DURATION,
+    EDIT_TRANSITION,
+    EDIT_IMAGE,
+    EDIT_FOLDER,
+    EDIT_COUNT
+} EditIndex;
 
 #ifdef _WIN32
 typedef wchar_t PathChar;
@@ -292,6 +302,14 @@ static int locate_setting(void *context, const char *section, const char *name, 
         if (edit->found) {
             edit->start = scan->line_start + (size_t)(address - base);
             edit->end = edit->start + length;
+            if (edit->value[0] == '\0') {
+                // A blank continuation would be ignored and reveal its earlier
+                // value. Add an explicit empty assignment after it instead.
+                const char *line = scan->bytes + scan->line_start;
+                size_t prefix = edit->start - scan->line_start;
+                edit->found = memchr(line, '=', prefix) != NULL ||
+                    memchr(line, ':', prefix) != NULL;
+            }
         }
         break;
     }
@@ -323,7 +341,7 @@ static bool add_missing_settings(FILE *file, const ConfigScan *scan)
 
 static bool write_updated_config(FILE *file, ConfigScan *scan)
 {
-    SettingEdit *ordered[4];
+    SettingEdit *ordered[EDIT_COUNT];
     size_t count = 0;
     bool insert = false;
     for (size_t i = 0; i < scan->edit_count; i++) {
@@ -365,28 +383,117 @@ static bool write_updated_config(FILE *file, ConfigScan *scan)
     return true;
 }
 
+static const char *configured_path(const char *path)
+{
+    return path != NULL ? path : "";
+}
+
+static char *encode_config_path(const char *path)
+{
+    const char *value = configured_path(path);
+    size_t length = strlen(value);
+    // A line break would introduce a second INI record.
+    if (strpbrk(value, "\r\n") != NULL || length > SIZE_MAX - 3)
+        return NULL;
+    if (length == 0)
+        return SDL_strdup("");
+
+    char *quoted = SDL_malloc(length + 3);
+    if (quoted != NULL) {
+        quoted[0] = '"';
+        memcpy(quoted + 1, value, length);
+        quoted[length + 1] = '"';
+        quoted[length + 2] = '\0';
+    }
+    return quoted;
+}
+
+typedef struct {
+    const char *image;
+    const char *folder;
+    bool image_matches;
+    bool folder_matches;
+} PathVerification;
+
+static int verify_path_value(void *context, const char *section, const char *key, const char *value)
+{
+    PathVerification *paths = context;
+    if (strcmp(section, "Background") != 0 || key == NULL || value == NULL)
+        return 1;
+
+    const char *expected;
+    bool *matches;
+    if (paths->image != NULL && strcmp(key, SETTING_BACKGROUND_IMAGE) == 0) {
+        expected = paths->image;
+        matches = &paths->image_matches;
+    }
+    else if (paths->folder != NULL && strcmp(key, SETTING_SLIDESHOW_DIRECTORY) == 0) {
+        expected = paths->folder;
+        matches = &paths->folder_matches;
+    }
+    else
+        return 1;
+
+    char *path = SDL_strdup(value);
+    *matches = false;
+    if (path != NULL) {
+        clean_path(path);
+        *matches = strcmp(path, expected) == 0;
+        SDL_free(path);
+    }
+    return 1;
+}
+
+static bool verify_config_paths(const PathChar *path, const BackgroundSettings *settings,
+    bool image_changed, bool folder_changed)
+{
+    PathVerification paths = {
+        .image = image_changed ? configured_path(settings->image_path) : NULL,
+        .folder = folder_changed ? configured_path(settings->folder_path) : NULL
+    };
+    FILE *file = open_native(path);
+    if (file == NULL)
+        return false;
+    int result = ini_parse_file(file, verify_path_value, &paths);
+    bool readable = !ferror(file);
+    fclose(file);
+    // The launcher ignores positive inih errors for unrelated legacy lines.
+    return readable && result >= 0 &&
+        (!image_changed || paths.image_matches) && (!folder_changed || paths.folder_matches);
+}
+
 bool save_background_config(const char *path, const BackgroundSettings *settings,
     const BackgroundSettings *previous, char *error, size_t error_size)
 {
-    SettingEdit edits[] = {
-        { .key = SETTING_BACKGROUND_MODE, .changed = settings->mode != previous->mode },
-        { .key = SETTING_COLLAGE_LAYOUT, .changed = settings->layout != previous->layout },
-        { .key = SETTING_SLIDESHOW_IMAGE_DURATION, .changed = settings->image_duration != previous->image_duration },
-        { .key = SETTING_SLIDESHOW_TRANSITION_TIME, .changed = settings->transition_time != previous->transition_time }
+    char duration[20], transition[20];
+    SDL_snprintf(duration, sizeof(duration), "%u", (unsigned)(settings->image_duration / 1000));
+    SDL_snprintf(transition, sizeof(transition), "%u.%03u",
+        (unsigned)(settings->transition_time / 1000), (unsigned)(settings->transition_time % 1000));
+    SettingEdit edits[EDIT_COUNT] = {
+        { .key = SETTING_BACKGROUND_MODE,
+            .value = get_mode_setting(MODE_SETTING_BACKGROUND, settings->mode),
+            .changed = settings->mode != previous->mode },
+        { .key = SETTING_COLLAGE_LAYOUT,
+            .value = get_mode_setting(MODE_SETTING_COLLAGE_LAYOUT, settings->layout),
+            .changed = settings->layout != previous->layout },
+        { .key = SETTING_SLIDESHOW_IMAGE_DURATION, .value = duration,
+            .changed = settings->image_duration != previous->image_duration },
+        { .key = SETTING_SLIDESHOW_TRANSITION_TIME, .value = transition,
+            .changed = settings->transition_time != previous->transition_time },
+        { .key = SETTING_BACKGROUND_IMAGE,
+            .changed = strcmp(configured_path(settings->image_path), configured_path(previous->image_path)) != 0 },
+        { .key = SETTING_SLIDESHOW_DIRECTORY,
+            .changed = strcmp(configured_path(settings->folder_path), configured_path(previous->folder_path)) != 0 }
     };
 
-    if (!edits[0].changed && !edits[1].changed && !edits[2].changed && !edits[3].changed)
+    bool changed = false;
+    for (size_t i = 0; i < SDL_arraysize(edits); i++)
+        changed |= edits[i].changed;
+    if (!changed)
         return true;
-    SDL_snprintf(edits[0].value, sizeof(edits[0].value), "%s",
-        get_mode_setting(MODE_SETTING_BACKGROUND, settings->mode));
-    SDL_snprintf(edits[1].value, sizeof(edits[1].value), "%s",
-        get_mode_setting(MODE_SETTING_COLLAGE_LAYOUT, settings->layout));
-    SDL_snprintf(edits[2].value, sizeof(edits[2].value), "%u", (unsigned)(settings->image_duration / 1000));
-    SDL_snprintf(edits[3].value, sizeof(edits[3].value), "%u.%03u",
-        (unsigned)(settings->transition_time / 1000), (unsigned)(settings->transition_time % 1000));
 
     bool saved = false;
-    PathChar *name = native_path(path);
+    PathChar *name = NULL;
     PathChar *backup = NULL;
     PathChar *temp = NULL;
 #ifndef _WIN32
@@ -395,7 +502,18 @@ bool save_background_config(const char *path, const BackgroundSettings *settings
 #endif
     char *bytes = NULL;
     size_t size = 0;
-    const char *failure = "Could not read the existing configuration.";
+    char *encoded_image = edits[EDIT_IMAGE].changed ? encode_config_path(settings->image_path) : NULL;
+    char *encoded_folder = edits[EDIT_FOLDER].changed ? encode_config_path(settings->folder_path) : NULL;
+    const char *path_error = "The selected photo or folder path could not be saved in the INI file.";
+    const char *failure = path_error;
+    if ((edits[EDIT_IMAGE].changed && encoded_image == NULL) ||
+        (edits[EDIT_FOLDER].changed && encoded_folder == NULL))
+        goto cleanup;
+    edits[EDIT_IMAGE].value = encoded_image;
+    edits[EDIT_FOLDER].value = encoded_folder;
+
+    failure = "Could not read the existing configuration.";
+    name = native_path(path);
     FILE *original = name != NULL ? open_native(name) : NULL;
     if (original == NULL)
         goto cleanup;
@@ -426,6 +544,13 @@ bool save_background_config(const char *path, const BackgroundSettings *settings
 #endif
     wrote_replacement = wrote_replacement && flush_file(replacement);
     if (fclose(replacement) != 0 || !wrote_replacement)
+        goto cleanup;
+
+    // Quoted paths are still subject to inih's inline comments and line-size
+    // limit. Test the full file before a backup or replace can affect the user.
+    failure = path_error;
+    if ((edits[EDIT_IMAGE].changed || edits[EDIT_FOLDER].changed) &&
+        !verify_config_paths(temp, settings, edits[EDIT_IMAGE].changed, edits[EDIT_FOLDER].changed))
         goto cleanup;
 
 #ifndef _WIN32
@@ -468,5 +593,7 @@ cleanup:
     free(temp);
     free(backup);
     free(name);
+    SDL_free(encoded_image);
+    SDL_free(encoded_folder);
     return saved;
 }
