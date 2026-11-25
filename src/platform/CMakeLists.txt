@@ -1,7 +1,7 @@
 # Build platform-specific library
 if (UNIX)
   add_library(platform unix.c unix.h platform.h)
-  target_link_libraries(platform PkgConfig::SDL2)
+  target_link_libraries(platform PkgConfig::SDL2 launcher_ini)
 endif ()
 if (WIN32)
   add_library(platform win32.c platform.h)

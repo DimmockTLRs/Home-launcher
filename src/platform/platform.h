@@ -9,6 +9,8 @@ bool file_exists(const char *path);
 void get_region(char *buffer);
 bool scan_slideshow_directory(PhotoList *files, const char *directory, SDL_atomic_t *cancel);
 bool start_process(char *cmd, bool application);
+bool valid_website_url(const char *url);
+bool open_website(const char *url);
 void scmd_shutdown(void);
 void scmd_restart(void);
 void scmd_sleep(void);

@@ -45,6 +45,7 @@
 #define SCMD_SELECT ":select"
 #define SCMD_SUBMENU ":submenu"
 #define SCMD_FORK ":fork"
+#define SCMD_WEBSITE ":website"
 #define SCMD_EXIT ":exit"
 #define SCMD_LEFT ":left"
 #define SCMD_RIGHT ":right"
@@ -57,6 +58,7 @@
 #define SCMD_SHUTDOWN ":shutdown"
 #define SCMD_RESTART ":restart"
 #define SCMD_SLEEP ":sleep"
+#define APP_ICON_DEFAULT ":app-icon"
 
 typedef enum {
     MODE_SETTING_BACKGROUND,

@@ -1,5 +1,7 @@
 #include <unistd.h>
 #include <errno.h>
+#include <spawn.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -157,6 +159,41 @@ bool start_process(char *cmd, bool application)
             break;
     }
     free(exec);
+    return true;
+}
+
+static int reap_browser_process(void *data)
+{
+    pid_t pid = (pid_t)(intptr_t)data;
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+        continue;
+    return 0;
+}
+
+bool open_website(const char *url)
+{
+    if (!valid_website_url(url)) {
+        log_error("Enter a valid HTTP or HTTPS website address");
+        return false;
+    }
+
+    extern char **environ;
+    char *args[] = { "xdg-open", (char *)url, NULL };
+    pid_t pid;
+    int error = posix_spawnp(&pid, args[0], NULL, NULL, args, environ);
+    if (error != 0) {
+        log_error("Could not launch the default browser: %s", strerror(error));
+        return false;
+    }
+
+    SDL_Thread *reaper = SDL_CreateThread(reap_browser_process, "Browser process", (void *)(intptr_t)pid);
+    if (reaper != NULL)
+        SDL_DetachThread(reaper);
+    else {
+        // The browser already launched; reap it here if it has already exited.
+        waitpid(pid, NULL, WNOHANG);
+        log_debug("Could not start browser process cleanup: %s", SDL_GetError());
+    }
     return true;
 }
 

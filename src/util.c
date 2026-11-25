@@ -22,9 +22,6 @@ static Menu *create_menu(const char *menu_name, size_t *num_menus);
 extern Config          config;
 extern GamepadControl  *gamepad_controls;
 extern Hotkey          *hotkeys;
-Menu                   *menu  = NULL;
-Entry                  *entry = NULL;
-
 static const char *mode_settings[][6] = {
     {"Color", "Image", "Slideshow", "Transparent", "Collage", NULL}, // Background Mode
     {"Blank", "None", "Quit", NULL, NULL},                // OnLaunch
@@ -469,95 +466,119 @@ int config_handler(void *user, const char *section, const char *name, const char
             add_gamepad_control(name, value);
     }
 
-    // Parse menus/entries
     else {
-        Entry *previous_entry = NULL;
+        Menu **slot = &config.first_menu;
+        while (*slot != NULL && strcmp((*slot)->name, section) != 0)
+            slot = &(*slot)->next;
+        if (*slot == NULL)
+            *slot = create_menu(section, &config.num_menus);
+        Menu *menu = *slot;
+        if (menu == NULL)
+            return 0;
 
-        // Check if menu struct exists for current section
-        if (config.first_menu == NULL) {
-            config.first_menu = create_menu(section, &config.num_menus);
-            menu = config.first_menu;
+        Entry parsed;
+        if (!parse_menu_entry(value, &parsed))
+            return 0;
+        Entry *entry = malloc(sizeof(*entry));
+        if (entry == NULL) {
+            clear_menu_entry(&parsed);
+            return 0;
         }
-        else {
-            bool menu_exists = false;
-            for (Menu *tmp = config.first_menu; tmp != NULL;
-            tmp = tmp->next) {
-                if (MATCH(tmp->name,section)) {
-                    menu_exists = true;
-                    break;
-                }
-            }
-
-        // Create menu if it doesn't already exist
-            if (menu_exists == false) {
-                menu->next = create_menu(section, &config.num_menus);
-                menu = menu->next;
-            }
+        *entry = parsed;
+        Entry **tail = &menu->first_entry;
+        while (*tail != NULL) {
+            entry->previous = *tail;
+            tail = &(*tail)->next;
         }
-
-        // Parse entry line for title, icon path, command
-        char *string = (char*) value;
-        char *token;
-        char *delimiter = ";";
-        token = strtok(string, delimiter);
-        if (token != NULL) {
-
-            // Create first entry in the menu if none exists
-            if (menu->first_entry == NULL) {
-                menu->first_entry = calloc(1, sizeof(Entry));
-                entry = menu->first_entry;
-                entry->next = NULL;
-            }
-
-            // Add entry to the end of the linked list
-            else {
-                previous_entry = entry;
-                entry = entry->next;
-                entry = calloc(1, sizeof(Entry));
-                previous_entry->next = entry;
-                entry->next = NULL;
-            }
-            entry->title_offset = 0;
-        }
-
-        // Store data in entry struct
-        int i;
-        for (i = 0;i < 3 && token != NULL; i++) {
-            if (i == 0)
-                entry->title = strdup(token);
-            else if (i == 1) {
-                entry->icon_path = strdup(token);
-                clean_path(entry->icon_path);
-                delimiter = "";
-            }
-            else if (i == 2)
-                entry->cmd = strdup(token);
-
-            token = strtok(NULL, delimiter);
-        }
-
-        // Delete entry if parse failed to find 3 valid tokens
-        if (i != 3 || MATCH(":select", entry->cmd)) {
-            if (menu->num_entries == 0) {
-                free(menu->first_entry);
-                menu->first_entry = NULL;
-            }
-            else {
-                free(entry);
-                entry = previous_entry;
-                entry->next = NULL;
-            }
-        }
-        else {
-            if (menu->num_entries == 0)
-                entry->previous = NULL;
-            else
-                entry->previous = previous_entry;
-            menu->num_entries++;
-            entry->icon_selected_path = selected_path(entry->icon_path);
-        }
+        *tail = entry;
+        menu->num_entries++;
     }
     return 0;
+}
+
+void clear_menu_entry(Entry *entry)
+{
+    if (entry->icon != NULL)
+        SDL_DestroyTexture(entry->icon);
+    if (entry->icon_selected != NULL)
+        SDL_DestroyTexture(entry->icon_selected);
+    if (entry->title_texture != NULL)
+        SDL_DestroyTexture(entry->title_texture);
+    free(entry->title);
+    free(entry->icon_path);
+    free(entry->icon_selected_path);
+    free(entry->cmd);
+    *entry = (Entry){0};
+}
+
+void free_menu_entries(Entry *entries)
+{
+    while (entries != NULL) {
+        Entry *next = entries->next;
+        clear_menu_entry(entries);
+        free(entries);
+        entries = next;
+    }
+}
+
+bool clone_menu_entries(const Entry *entries, const Entry *stop, Entry **copies)
+{
+    Entry *previous = NULL;
+    Entry **slot = copies;
+    *copies = NULL;
+    for (const Entry *entry = entries; entry != NULL && entry != stop; entry = entry->next) {
+        Entry *copy = calloc(1, sizeof(*copy));
+        if (copy != NULL) {
+            *slot = copy;
+            copy->title = strdup(entry->title);
+            copy->icon_path = strdup(entry->icon_path);
+            copy->cmd = strdup(entry->cmd);
+        }
+        if (copy == NULL || copy->title == NULL || copy->icon_path == NULL || copy->cmd == NULL) {
+            free_menu_entries(*copies);
+            *copies = NULL;
+            return false;
+        }
+        copy->previous = previous;
+        previous = copy;
+        slot = &copy->next;
+    }
+    return true;
+}
+
+static char *copy_entry_field(const char *start, const char *end)
+{
+    size_t length = (size_t)(end - start);
+    char *field = malloc(length + 1);
+    if (field != NULL) {
+        memcpy(field, start, length);
+        field[length] = '\0';
+    }
+    return field;
+}
+
+bool parse_menu_entry(const char *value, Entry *entry)
+{
+    *entry = (Entry){0};
+    // Match the legacy delimiter rules and keep semicolons inside the command.
+    const char *title = value + strspn(value, ";");
+    const char *title_end = strchr(title, ';');
+    if (title_end == NULL)
+        return false;
+    const char *icon = title_end + strspn(title_end, ";");
+    const char *icon_end = strchr(icon, ';');
+    if (icon_end == NULL || icon_end[1] == '\0' || strcmp(icon_end + 1, SCMD_SELECT) == 0)
+        return false;
+
+    entry->title = copy_entry_field(title, title_end);
+    entry->icon_path = copy_entry_field(icon, icon_end);
+    entry->cmd = strdup(icon_end + 1);
+    if (entry->title == NULL || entry->icon_path == NULL || entry->cmd == NULL) {
+        clear_menu_entry(entry);
+        return false;
+    }
+    clean_path(entry->icon_path);
+    return true;
 }
 
 static bool parse_mode_setting(ModeSettingType type, const char *value, int *setting)
@@ -1134,20 +1155,15 @@ Menu *get_menu(const char *menu_name)
 // A function to allocate memory to and initialize a menu struct
 Menu *create_menu(const char *menu_name, size_t *num_menus)
 {
-    Menu *menu = malloc(sizeof(Menu));
-    *menu = (Menu) {
-        .first_entry = NULL,
-        .next = NULL,
-        .back = NULL,
-        .root_entry = NULL,
-        .num_entries = 0,
-        .page = 0,
-        .highlight_position = 0,
-        .rendered = false
-    };
+    Menu *menu = calloc(1, sizeof(*menu));
+    if (menu == NULL)
+        return NULL;
     menu->name = strdup(menu_name);
+    if (menu->name == NULL) {
+        free(menu);
+        return NULL;
+    }
     (*num_menus)++;
-    
     return menu;
 }
 

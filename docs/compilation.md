@@ -21,17 +21,17 @@ First, install the dependencies. The steps to do so are dependent on your distro
 
 #### APT-based Distributions (Debian, Ubuntu, Mint, Raspberry Pi OS etc.)
 ```bash
-sudo apt install libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev libinih-dev
+sudo apt install libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev
 ```
 
 #### Pacman-based Distributions (Arch, Manjaro, etc.)
 ```bash
-sudo pacman -S sdl2 sdl2_image sdl2_ttf libinih
+sudo pacman -S sdl2 sdl2_image sdl2_ttf
 ```
 
 #### DNF-based Distributions (Fedora)
 ```bash
-sudo dnf install SDL2-devel SDL2_image-devel SDL2_ttf-devel inih-devel
+sudo dnf install SDL2-devel SDL2_image-devel SDL2_ttf-devel
 ```
 
 ### Building

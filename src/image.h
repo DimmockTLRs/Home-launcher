@@ -27,6 +27,7 @@ void quit_svg(void);
 void render_scroll_indicators(Scroll *scroll, int height, Geometry *geo);
 SDL_Texture *load_texture(SDL_Surface *surface);
 SDL_Texture *load_texture_from_file(const char *path);
+SDL_Texture *default_app_icon(void);
 SDL_Texture *rasterize_svg(char *buffer, int w, int h, SDL_Rect *rect);
 SDL_Texture *rasterize_svg_from_file(const char *path, int w, int h, SDL_Rect *rect);
 SDL_Texture *render_highlight(int width, int height, SDL_Rect *rect);

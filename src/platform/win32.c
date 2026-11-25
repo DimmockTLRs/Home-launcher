@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <windows.h>
+#include <powrprof.h>
 #include <wchar.h>
 #include <SDL.h>
 #include <SDL_syswm.h>
@@ -108,34 +109,63 @@ void hide_cursor(Entry *entry)
     );
 }
 
-// A function to launch an application
-bool start_process(char *cmd, bool application)
+static wchar_t *launch_wide_text(const char *text)
 {
-    char file[MAX_PATH_CHARS + 1];
-    const char *params = NULL;
-    if (!parse_command(cmd, file, sizeof(file), &params)) {
-        log_error("Could not parse the launch target; check path length and quoting");
+    UINT encoding = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    int length = MultiByteToWideChar(encoding, flags, text, -1, NULL, 0);
+    if (length == 0) {
+        // Keep accepting launch commands from older INIs saved in the system code page.
+        encoding = CP_ACP;
+        flags = 0;
+        length = MultiByteToWideChar(encoding, flags, text, -1, NULL, 0);
+    }
+    if (length == 0)
+        return NULL;
+    wchar_t *wide = malloc((size_t)length * sizeof(*wide));
+    if (wide != NULL && MultiByteToWideChar(encoding, flags, text, -1, wide, length) == 0) {
+        free(wide);
+        wide = NULL;
+    }
+    return wide;
+}
+
+static bool activate_windows_target(const char *file, const char *params, bool application, bool website)
+{
+    wchar_t *wide_file = launch_wide_text(file);
+    wchar_t *wide_params = params != NULL ? launch_wide_text(params) : NULL;
+    if (wide_file == NULL || (params != NULL && wide_params == NULL)) {
+        free(wide_file);
+        free(wide_params);
+        log_error("Could not prepare the launch target for Windows");
         return false;
     }
 
-    SHELLEXECUTEINFOA info = {
-        .cbSize = sizeof(SHELLEXECUTEINFOA),
-        .fMask = application ? SEE_MASK_NOCLOSEPROCESS : 0,
-        .lpVerb = "open",
-        .lpFile = file,
-        .lpParameters = params,
-        .nShow = application ? SW_SHOWMAXIMIZED : SW_HIDE,
+    SHELLEXECUTEINFOW info = {
+        .cbSize = sizeof(SHELLEXECUTEINFOW),
+        .fMask = (application ? SEE_MASK_NOCLOSEPROCESS : 0) | (website ? SEE_MASK_FLAG_NO_UI : 0),
+        .lpVerb = L"open",
+        .lpFile = wide_file,
+        .lpParameters = wide_params,
+        .nShow = website ? SW_SHOWNORMAL : (application ? SW_SHOWMAXIMIZED : SW_HIDE),
     };
 
+    const char *label = website ? "website" : file;
     log_debug("Starting Windows shell activation for '%s' (tracked=%s)",
-        file, application ? "yes" : "no");
+        label, application ? "yes" : "no");
     Uint32 started = SDL_GetTicks();
-    BOOL successful = ShellExecuteExA(&info);
+    // Shell handlers for links and file associations may use COM.
+    HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    BOOL successful = ShellExecuteExW(&info);
     DWORD error = successful ? ERROR_SUCCESS : GetLastError();
+    if (SUCCEEDED(com))
+        CoUninitialize();
     Uint32 elapsed = SDL_GetTicks() - started;
+    free(wide_file);
+    free(wide_params);
     if (!successful) {
         log_error("Windows shell activation failed for '%s': Win32 error %lu after %u ms",
-            file, (unsigned long)error, (unsigned)elapsed);
+            label, (unsigned long)error, (unsigned)elapsed);
         return false;
     }
 
@@ -154,6 +184,28 @@ bool start_process(char *cmd, bool application)
         log_debug("Could not lower launcher window: Win32 error %lu", (unsigned long)GetLastError());
     }
     return true;
+}
+
+// A function to launch an application
+bool start_process(char *cmd, bool application)
+{
+    char file[MAX_PATH_CHARS + 1];
+    const char *params = NULL;
+    if (!parse_command(cmd, file, sizeof(file), &params)) {
+        log_error("Could not parse the launch target; check path length and quoting");
+        return false;
+    }
+    return activate_windows_target(file, params, application, false);
+}
+
+bool open_website(const char *url)
+{
+    if (!valid_website_url(url)) {
+        log_error("Enter a valid HTTP or HTTPS website address");
+        return false;
+    }
+    // Pass the entire address as the shell target, with no command line or parameters.
+    return activate_windows_target(url, NULL, true, true);
 }
 
 // Enumerate UTF-8 folder paths using Windows' Unicode filesystem API.

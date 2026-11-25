@@ -5,6 +5,7 @@
 #include <SDL_ttf.h>
 #include <launcher_config.h>
 #include "launcher.h"
+#include "app_editor.h"
 #include "config_save.h"
 #include "image.h"
 #include "photo_gallery.h"
@@ -15,6 +16,7 @@ extern Config config;
 extern Geometry geo;
 extern TextInfo title_info;
 extern bool apply_background_settings(const BackgroundSettings *settings, char *error, size_t error_size);
+extern bool open_launcher_app_editor(TTF_Font *heading, TTF_Font *body, TTF_Font *small);
 extern void request_launcher_redraw(void);
 
 typedef enum {
@@ -25,6 +27,7 @@ typedef enum {
     ROW_SAVE,
     ROW_BACK,
     ROW_MANAGE,
+    ROW_APPS,
     ROW_COUNT
 } SettingsRow;
 
@@ -71,6 +74,7 @@ static struct {
     SettingsText save;
     SettingsText back;
     SettingsText manage;
+    SettingsText apps;
     SettingsText help;
     SettingsText notice;
     SDL_Texture *row;
@@ -226,6 +230,7 @@ bool settings_open(void)
     ui.rows[ROW_BACK] = bounds(252, 826, 240, 76);
     ui.rows[ROW_MANAGE] = bounds(520, 826, 348, 76);
     ui.rows[ROW_SAVE] = bounds(1320, 826, 348, 76);
+    ui.rows[ROW_APPS] = bounds(1170, 133, 498, 76);
 
     char font_dir[MAX_PATH_CHARS + 1];
     const char *prefixes[] = {
@@ -258,6 +263,7 @@ bool settings_open(void)
     set_text(&ui.save, ui.body_font, "Save and return", light);
     set_text(&ui.back, ui.body_font, "Back", light);
     set_text(&ui.manage, ui.body_font, "Manage photos", light);
+    set_text(&ui.apps, ui.body_font, "Applications and icons", light);
     set_text(&ui.help, ui.small_font, "Arrows  Navigate or adjust     Enter / A  Select     Esc / B  Back", muted);
     for (int i = 0; i < ROW_SAVE; i++) {
         set_text(&ui.labels[i], ui.body_font, labels[i], light);
@@ -327,6 +333,11 @@ static void activate(int direction)
             ui.heading_font, ui.body_font, ui.small_font);
         return;
     }
+    if (ui.selected == ROW_APPS) {
+        if (!open_launcher_app_editor(ui.heading_font, ui.body_font, ui.small_font))
+            set_notice("Could not open the application editor.", caution);
+        return;
+    }
     if (ui.selected == ROW_BACK || !edited()) {
         close_settings();
         return;
@@ -357,6 +368,19 @@ void settings_save_completed(bool success, const char *error)
     }
 }
 
+void settings_app_save_completed(bool success, const char *error)
+{
+    app_editor_save_completed(success, error);
+    if (!success)
+        return;
+    if (edited()) {
+        set_notice("Application cards saved. Save Backgrounds to apply its other changes.", muted);
+        request_launcher_redraw();
+    }
+    else
+        close_settings();
+}
+
 static void return_from_gallery(void)
 {
     if (!photo_gallery_is_open()) {
@@ -369,6 +393,10 @@ void settings_command(const char *command)
 {
     if (!ui.open || ui.saving || command == NULL)
         return;
+    if (app_editor_is_open()) {
+        app_editor_command(command);
+        return;
+    }
     if (photo_gallery_is_open()) {
         photo_gallery_command(command);
         return_from_gallery();
@@ -402,6 +430,10 @@ void settings_mouse(int x, int y, bool click)
 {
     if (!ui.open || ui.saving)
         return;
+    if (app_editor_is_open()) {
+        app_editor_mouse(x, y, click);
+        return;
+    }
     if (photo_gallery_is_open()) {
         photo_gallery_mouse(x, y, click);
         return_from_gallery();
@@ -423,9 +455,26 @@ void settings_mouse(int x, int y, bool click)
     }
 }
 
+bool settings_is_typing(void)
+{
+    return app_editor_is_typing();
+}
+
+void settings_key(SDL_Keycode key)
+{
+    app_editor_key(key);
+}
+
+void settings_text(const char *text)
+{
+    if (app_editor_is_typing())
+        app_editor_text(text);
+}
+
 void settings_pump(void)
 {
     pump_photo_gallery();
+    app_editor_pump();
 }
 
 static void fill(SDL_Renderer *renderer, const SDL_Rect *rect, SDL_Color color)
@@ -454,6 +503,10 @@ void settings_draw(SDL_Renderer *renderer)
 {
     if (!ui.open)
         return;
+    if (app_editor_is_open()) {
+        app_editor_draw(renderer);
+        return;
+    }
     if (photo_gallery_is_open()) {
         draw_photo_gallery(renderer);
         return;
@@ -467,6 +520,7 @@ void settings_draw(SDL_Renderer *renderer)
     fill(renderer, &panel, (SDL_Color){ 14, 23, 38, 255 });
     draw_text(renderer, &ui.section, bounds(252, 88, 950, 42), false);
     draw_text(renderer, &ui.title, bounds(252, 122, 1100, 92), false);
+    draw_action(renderer, ROW_APPS, &ui.apps);
 
     for (int i = 0; i < ROW_SAVE; i++) {
         SDL_Rect rect = ui.rows[i];
@@ -495,6 +549,7 @@ void settings_quit(void)
     if (!ui.open)
         return;
 
+    app_editor_quit();
     free(ui.image_path);
     free(ui.folder_path);
     if (ui.cursor_before >= 0)
@@ -510,6 +565,7 @@ void settings_quit(void)
     SDL_DestroyTexture(ui.save.texture);
     SDL_DestroyTexture(ui.back.texture);
     SDL_DestroyTexture(ui.manage.texture);
+    SDL_DestroyTexture(ui.apps.texture);
     SDL_DestroyTexture(ui.help.texture);
     SDL_DestroyTexture(ui.notice.texture);
     SDL_DestroyTexture(ui.row);

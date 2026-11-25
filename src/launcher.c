@@ -12,6 +12,7 @@
 #include <launcher_config.h>
 #include "image.h"
 #include "background.h"
+#include "app_editor.h"
 #include "config_save.h"
 #include "photo_files.h"
 #include "photo_gallery.h"
@@ -208,6 +209,15 @@ static struct {
     char error[256];
 } settings_save;
 
+static struct {
+    SDL_Thread *thread;
+    SDL_atomic_t ready;
+    Entry *before;
+    Entry *after;
+    bool saved;
+    char error[256];
+} menu_save;
+
 void request_launcher_redraw(void)
 {
     redraw_requested = true;
@@ -245,7 +255,7 @@ static void free_save_paths(void)
 
 bool apply_background_settings(const BackgroundSettings *settings, char *error, size_t error_size)
 {
-    if (settings_save.thread != NULL) {
+    if (settings_save.thread != NULL || menu_save.thread != NULL) {
         SDL_strlcpy(error, "A save is already in progress.", error_size);
         return false;
     }
@@ -323,26 +333,102 @@ static void finish_settings_save(void)
     request_launcher_redraw();
 }
 
-static void add_settings_card(Menu *menu)
+static int save_menu_worker(void *unused)
+{
+    (void)unused;
+    menu_save.saved = save_menu_config(config_file_path, default_menu->name, menu_save.after,
+        menu_save.before, menu_save.error, sizeof(menu_save.error));
+    SDL_AtomicSet(&menu_save.ready, 1);
+    return 0;
+}
+
+static void free_menu_save_entries(void)
+{
+    free_menu_entries(menu_save.before);
+    free_menu_entries(menu_save.after);
+    menu_save.before = NULL;
+    menu_save.after = NULL;
+}
+
+bool apply_menu_settings(const Entry *entries, char *error, size_t error_size)
+{
+    if (settings_save.thread != NULL || menu_save.thread != NULL) {
+        SDL_strlcpy(error, "A save is already in progress.", error_size);
+        return false;
+    }
+    if (!clone_menu_entries(default_menu->first_entry, settings_entry, &menu_save.before) ||
+        !clone_menu_entries(entries, NULL, &menu_save.after)) {
+        free_menu_save_entries();
+        SDL_strlcpy(error, "Could not store the application edits.", error_size);
+        return false;
+    }
+    menu_save.error[0] = '\0';
+    SDL_AtomicSet(&menu_save.ready, 0);
+    menu_save.thread = SDL_CreateThread(save_menu_worker, "Save application cards", NULL);
+    if (menu_save.thread == NULL) {
+        free_menu_save_entries();
+        SDL_strlcpy(error, "Could not start the application save.", error_size);
+        return false;
+    }
+    return true;
+}
+
+bool open_launcher_app_editor(TTF_Font *heading, TTF_Font *body, TTF_Font *small)
+{
+    return app_editor_open(default_menu->first_entry, settings_entry, heading, body, small);
+}
+
+static void attach_settings_card(Menu *menu)
 {
     Entry *last = NULL;
-    for (Entry *entry = menu->first_entry; entry != NULL; entry = entry->next)
+    menu->num_entries = 0;
+    for (Entry *entry = menu->first_entry; entry != NULL; entry = entry->next) {
         last = entry;
-
-    settings_entry = calloc(1, sizeof(*settings_entry));
-    if (settings_entry == NULL)
-        log_fatal("Could not allocate Settings card");
-    settings_entry->title = strdup("Settings");
-    settings_entry->icon_path = strdup("(built-in gear)");
-    settings_entry->cmd = strdup(SCMD_SETTINGS);
+        menu->num_entries++;
+    }
     if (last == NULL)
         menu->first_entry = settings_entry;
     else
         last->next = settings_entry;
     settings_entry->previous = last;
     menu->num_entries++;
+}
+
+static void add_settings_card(Menu *menu)
+{
+    settings_entry = calloc(1, sizeof(*settings_entry));
+    if (settings_entry == NULL)
+        log_fatal("Could not allocate Settings card");
+    settings_entry->title = strdup("Settings");
+    settings_entry->icon_path = strdup("(built-in gear)");
+    settings_entry->cmd = strdup(SCMD_SETTINGS);
     if (settings_entry->title == NULL || settings_entry->icon_path == NULL || settings_entry->cmd == NULL)
         log_fatal("Could not allocate Settings card text");
+    attach_settings_card(menu);
+}
+
+static void finish_menu_save(void)
+{
+    if (menu_save.thread == NULL || !SDL_AtomicGet(&menu_save.ready))
+        return;
+    SDL_WaitThread(menu_save.thread, NULL);
+    menu_save.thread = NULL;
+    if (menu_save.saved) {
+        if (settings_entry->previous != NULL) {
+            settings_entry->previous->next = NULL;
+            free_menu_entries(default_menu->first_entry);
+        }
+        default_menu->first_entry = menu_save.after;
+        menu_save.after = NULL;
+        attach_settings_card(default_menu);
+        default_menu->rendered = false;
+        load_menu(default_menu, false, true);
+        default_menu->last_selected_entry = current_entry;
+        log_debug("Application cards saved to %s", config_file_path);
+    }
+    free_menu_save_entries();
+    settings_app_save_completed(menu_save.saved, menu_save.error);
+    request_launcher_redraw();
 }
 
 static SDL_Texture *settings_gear_icon(void)
@@ -568,6 +654,9 @@ static void cleanup()
     if (settings_save.thread != NULL)
         SDL_WaitThread(settings_save.thread, NULL);
     free_save_paths();
+    if (menu_save.thread != NULL)
+        SDL_WaitThread(menu_save.thread, NULL);
+    free_menu_save_entries();
     quit_photo_gallery();
     settings_quit();
     quit_background();
@@ -579,6 +668,14 @@ static void cleanup()
         TTF_CloseFont(title_info.font);
     if (clk != NULL && clk->text_info.font != NULL)
         TTF_CloseFont(clk->text_info.font);
+
+    while (config.first_menu != NULL) {
+        Menu *menu = config.first_menu;
+        config.first_menu = menu->next;
+        free_menu_entries(menu->first_entry);
+        free(menu->name);
+        free(menu);
+    }
     
     // Destroy renderer and window
     if (renderer != NULL) {
@@ -619,28 +716,6 @@ static void cleanup()
     free(screensaver);
     free(clk);
 
-    // Free menu and entry linked lists
-    Entry *entry = NULL;
-    Entry *tmp_entry = NULL;
-    Menu *menu = config.first_menu;
-    Menu *tmp_menu = NULL;
-    for (size_t i = 0; i < config.num_menus; i++) {
-        free(menu->name);
-        entry = menu->first_entry;
-        for(size_t j = 0; j < menu->num_entries; j++) {
-            free(entry->title);
-            free(entry->icon_path);
-            free(entry->icon_selected_path);
-            free(entry->cmd);
-            tmp_entry = entry;
-            entry = entry->next;
-            free(tmp_entry);
-        }
-        tmp_menu = menu;
-        menu = menu->next;
-        free(tmp_menu);
-    }
-
     // Free hotkey linked list
     Hotkey *tmp_hotkey = NULL;
     for(Hotkey *i = hotkeys; i != NULL; i = i->next) {
@@ -667,6 +742,10 @@ static void handle_keypress(SDL_Keysym *key)
         log_debug("Key %s (#%X) detected", SDL_GetKeyName(key->sym), key->sym);
 
     if (settings_is_open()) {
+        if (settings_is_typing()) {
+            settings_key(key->sym);
+            return;
+        }
         switch (key->sym) {
             case SDLK_UP: settings_command(SCMD_UP); break;
             case SDLK_DOWN: settings_command(SCMD_DOWN); break;
@@ -853,9 +932,18 @@ static void render_buttons(Menu *menu)
     Entry *entry;
     int h;
     for (entry = menu->first_entry; entry != NULL; entry = entry->next) {
-        entry->icon = entry == settings_entry ? settings_gear_icon() : load_texture_from_file(entry->icon_path);
-        entry->icon_selected = (entry->icon_selected_path != NULL) ? load_texture_from_file(entry->icon_selected_path) : NULL;
-        if (config.titles_enabled) {
+        if (entry == settings_entry) {
+            if (entry->icon == NULL)
+                entry->icon = settings_gear_icon();
+        }
+        else if (strcmp(entry->icon_path, APP_ICON_DEFAULT) == 0)
+            entry->icon = default_app_icon();
+        else {
+            entry->icon = load_texture_from_file(entry->icon_path);
+            entry->icon_selected_path = selected_path(entry->icon_path);
+            entry->icon_selected = load_texture_from_file(entry->icon_selected_path);
+        }
+        if (config.titles_enabled && entry->title_texture == NULL) {
             entry->title_texture = render_text_texture(entry->title, &title_info, &entry->text_rect, &h);
             if (config.title_oversize_mode == OVERSIZE_SHRINK && h != geo.font_height)
                 entry->title_offset = (geo.font_height - h) / 2;
@@ -1063,6 +1151,18 @@ static void draw_screen()
     }
 }
 
+static void wait_for_launched_application(void)
+{
+    state.application_launching = true;
+    redraw_requested = true;
+    ticks.application_launched = SDL_GetTicks();
+    log_debug("Waiting for focus handoff (timeout %u ms)", (unsigned)config.application_timeout);
+    if (config.on_launch == ON_LAUNCH_BLANK)
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xFF);
+    else if (config.on_launch == ON_LAUNCH_QUIT)
+        quit(EXIT_SUCCESS);
+}
+
 // A function to execute the user's command
 static void execute_command(const char *command)
 {
@@ -1086,6 +1186,11 @@ static void execute_command(const char *command)
             char *fork_command = strtok(NULL, "");
             if (fork_command != NULL)
                 start_process(fork_command, false);
+        }
+        else if (!strcmp(special_command, SCMD_WEBSITE)) {
+            const char *url = strtok(NULL, "");
+            if (open_website(url))
+                wait_for_launched_application();
         }
         else if (!strcmp(special_command, SCMD_LEFT))
             move_left();
@@ -1117,19 +1222,8 @@ static void execute_command(const char *command)
     }
 
     // Launch external application
-    else {
-        if (start_process(cmd, true)) {
-            state.application_launching = true;
-            redraw_requested = true;
-            ticks.application_launched = SDL_GetTicks();
-            log_debug("Waiting for focus handoff (timeout %u ms)",
-                (unsigned)config.application_timeout);
-            if (config.on_launch == ON_LAUNCH_BLANK)
-                SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0xFF);
-            else if (config.on_launch == ON_LAUNCH_QUIT)
-                quit(EXIT_SUCCESS);
-        }
-    }
+    else if (start_process(cmd, true))
+        wait_for_launched_application();
     free(cmd);
 }
 
@@ -1602,16 +1696,21 @@ int main(int argc, char *argv[])
                         break;
                     ticks.last_input = ticks.main;
                     bool editing = settings_is_open();
+                    bool typing = settings_is_typing();
                     SDL_Keycode key = event.key.keysym.sym;
                     handle_keypress(&event.key.keysym);
-                    settings_key_latched[scancode] = editing != settings_is_open() ||
-                        (editing && (key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE ||
+                    settings_key_latched[scancode] = editing != settings_is_open() || typing != settings_is_typing() ||
+                        (editing && !typing && (key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE ||
                             key == SDLK_ESCAPE || key == SDLK_BACKSPACE));
                     break;
                 }
 
                 case SDL_KEYUP:
                     settings_key_latched[event.key.keysym.scancode] = false;
+                    break;
+
+                case SDL_TEXTINPUT:
+                    settings_text(event.text.text);
                     break;
                 
                 case SDL_MOUSEMOTION:
@@ -1708,6 +1807,7 @@ int main(int argc, char *argv[])
         }
 
         finish_settings_save();
+        finish_menu_save();
         settings_pump();
 
         // Post-event loop updates

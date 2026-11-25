@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -275,14 +276,34 @@ static char *scan_line(char *buffer, int capacity, void *context)
     return buffer;
 }
 
+static bool scan_value_range(const ConfigScan *scan, const char *value, size_t *start, size_t *end)
+{
+    // inih strips comments and whitespace inside its line buffer. The value's
+    // position and length then identify the exact bytes we can replace.
+    uintptr_t base = (uintptr_t)scan->parser_buffer;
+    uintptr_t address = (uintptr_t)value;
+    size_t length = strlen(value);
+    if (address < base || address - base > scan->first_chunk_length ||
+        length > scan->first_chunk_length - (size_t)(address - base))
+        return false;
+    *start = scan->line_start + (size_t)(address - base);
+    *end = *start + length;
+    return true;
+}
+
+static size_t scan_line_end(const ConfigScan *scan)
+{
+    const char *newline = strchr(scan->bytes + scan->line_start, '\n');
+    return newline != NULL ? (size_t)(newline - scan->bytes) + 1 : scan->size;
+}
+
 static int locate_setting(void *context, const char *section, const char *name, const char *value)
 {
     ConfigScan *scan = context;
     if (strcmp(section, "Background") != 0)
         return 1;
 
-    const char *newline = strchr(scan->bytes + scan->line_start, '\n');
-    scan->background_end = newline != NULL ? (size_t)(newline - scan->bytes) + 1 : scan->size;
+    scan->background_end = scan_line_end(scan);
     scan->has_background_entry = true;
     if (name == NULL || value == NULL)
         return 1;
@@ -292,16 +313,8 @@ static int locate_setting(void *context, const char *section, const char *name, 
         if (!edit->changed || strcmp(edit->key, name) != 0)
             continue;
 
-        // inih strips comments and whitespace inside its line buffer. The value's
-        // position and length then identify the exact bytes we can replace.
-        uintptr_t base = (uintptr_t)scan->parser_buffer;
-        uintptr_t address = (uintptr_t)value;
-        size_t length = strlen(value);
-        edit->found = address >= base && address - base <= scan->first_chunk_length &&
-            length <= scan->first_chunk_length - (size_t)(address - base);
+        edit->found = scan_value_range(scan, value, &edit->start, &edit->end);
         if (edit->found) {
-            edit->start = scan->line_start + (size_t)(address - base);
-            edit->end = edit->start + length;
             if (edit->value[0] == '\0') {
                 // A blank continuation would be ignored and reveal its earlier
                 // value. Add an explicit empty assignment after it instead.
@@ -321,11 +334,15 @@ static bool put_bytes(FILE *file, const char *data, size_t size)
     return fwrite(data, 1, size, file) == size;
 }
 
+static const char *config_line_break(const char *bytes)
+{
+    const char *newline = strchr(bytes, '\n');
+    return newline != NULL && newline > bytes && newline[-1] == '\r' ? "\r\n" : "\n";
+}
+
 static bool add_missing_settings(FILE *file, const ConfigScan *scan)
 {
-    const char *newline = strchr(scan->bytes, '\n');
-    const char *line_break = newline != NULL && newline > scan->bytes && newline[-1] == '\r' ?
-        "\r\n" : "\n";
+    const char *line_break = config_line_break(scan->bytes);
     size_t at = scan->has_background_entry ? scan->background_end : scan->size;
     if (at > 0 && scan->bytes[at - 1] != '\n' && fputs(line_break, file) == EOF)
         return false;
@@ -444,54 +461,15 @@ static int verify_path_value(void *context, const char *section, const char *key
     return 1;
 }
 
-static bool verify_config_paths(const PathChar *path, const BackgroundSettings *settings,
-    bool image_changed, bool folder_changed)
+typedef struct {
+    const char *(*write)(FILE *file, const char *bytes, size_t size, void *context);
+    bool (*verify)(FILE *file, void *context);
+    const char *verification_error;
+} ConfigEdit;
+
+static bool update_config_file(const char *path, const ConfigEdit *edit, void *context,
+    char *error, size_t error_size)
 {
-    PathVerification paths = {
-        .image = image_changed ? configured_path(settings->image_path) : NULL,
-        .folder = folder_changed ? configured_path(settings->folder_path) : NULL
-    };
-    FILE *file = open_native(path);
-    if (file == NULL)
-        return false;
-    int result = ini_parse_file(file, verify_path_value, &paths);
-    bool readable = !ferror(file);
-    fclose(file);
-    // The launcher ignores positive inih errors for unrelated legacy lines.
-    return readable && result >= 0 &&
-        (!image_changed || paths.image_matches) && (!folder_changed || paths.folder_matches);
-}
-
-bool save_background_config(const char *path, const BackgroundSettings *settings,
-    const BackgroundSettings *previous, char *error, size_t error_size)
-{
-    char duration[20], transition[20];
-    SDL_snprintf(duration, sizeof(duration), "%u", (unsigned)(settings->image_duration / 1000));
-    SDL_snprintf(transition, sizeof(transition), "%u.%03u",
-        (unsigned)(settings->transition_time / 1000), (unsigned)(settings->transition_time % 1000));
-    SettingEdit edits[EDIT_COUNT] = {
-        { .key = SETTING_BACKGROUND_MODE,
-            .value = get_mode_setting(MODE_SETTING_BACKGROUND, settings->mode),
-            .changed = settings->mode != previous->mode },
-        { .key = SETTING_COLLAGE_LAYOUT,
-            .value = get_mode_setting(MODE_SETTING_COLLAGE_LAYOUT, settings->layout),
-            .changed = settings->layout != previous->layout },
-        { .key = SETTING_SLIDESHOW_IMAGE_DURATION, .value = duration,
-            .changed = settings->image_duration != previous->image_duration },
-        { .key = SETTING_SLIDESHOW_TRANSITION_TIME, .value = transition,
-            .changed = settings->transition_time != previous->transition_time },
-        { .key = SETTING_BACKGROUND_IMAGE,
-            .changed = strcmp(configured_path(settings->image_path), configured_path(previous->image_path)) != 0 },
-        { .key = SETTING_SLIDESHOW_DIRECTORY,
-            .changed = strcmp(configured_path(settings->folder_path), configured_path(previous->folder_path)) != 0 }
-    };
-
-    bool changed = false;
-    for (size_t i = 0; i < SDL_arraysize(edits); i++)
-        changed |= edits[i].changed;
-    if (!changed)
-        return true;
-
     bool saved = false;
     PathChar *name = NULL;
     PathChar *backup = NULL;
@@ -502,17 +480,7 @@ bool save_background_config(const char *path, const BackgroundSettings *settings
 #endif
     char *bytes = NULL;
     size_t size = 0;
-    char *encoded_image = edits[EDIT_IMAGE].changed ? encode_config_path(settings->image_path) : NULL;
-    char *encoded_folder = edits[EDIT_FOLDER].changed ? encode_config_path(settings->folder_path) : NULL;
-    const char *path_error = "The selected photo or folder path could not be saved in the INI file.";
-    const char *failure = path_error;
-    if ((edits[EDIT_IMAGE].changed && encoded_image == NULL) ||
-        (edits[EDIT_FOLDER].changed && encoded_folder == NULL))
-        goto cleanup;
-    edits[EDIT_IMAGE].value = encoded_image;
-    edits[EDIT_FOLDER].value = encoded_folder;
-
-    failure = "Could not read the existing configuration.";
+    const char *failure = "Could not read the existing configuration.";
     name = native_path(path);
     FILE *original = name != NULL ? open_native(name) : NULL;
     if (original == NULL)
@@ -528,30 +496,33 @@ bool save_background_config(const char *path, const BackgroundSettings *settings
     if (bytes == NULL)
         goto cleanup;
 
-    ConfigScan scan = { .bytes = bytes, .size = size, .edits = edits, .edit_count = SDL_arraysize(edits) };
-    if (ini_parse_stream(scan_line, &scan, locate_setting, &scan) < 0)
-        goto cleanup;
-
     failure = "Could not write a temporary configuration in the original folder.";
     backup = path_with_suffix(name, BACKUP_SUFFIX);
     FILE *replacement = backup != NULL ? create_temp(name, &temp) : NULL;
     if (replacement == NULL)
         goto cleanup;
-    bool wrote_replacement = write_updated_config(replacement, &scan);
+    const char *write_error = edit->write(replacement, bytes, size, context);
+    bool wrote_replacement = write_error == NULL;
 #ifndef _WIN32
     wrote_replacement = wrote_replacement &&
         fchmod(fileno(replacement), original_stat.st_mode & 0777) == 0;
 #endif
     wrote_replacement = wrote_replacement && flush_file(replacement);
+    if (write_error != NULL)
+        failure = write_error;
     if (fclose(replacement) != 0 || !wrote_replacement)
         goto cleanup;
 
-    // Quoted paths are still subject to inih's inline comments and line-size
-    // limit. Test the full file before a backup or replace can affect the user.
-    failure = path_error;
-    if ((edits[EDIT_IMAGE].changed || edits[EDIT_FOLDER].changed) &&
-        !verify_config_paths(temp, settings, edits[EDIT_IMAGE].changed, edits[EDIT_FOLDER].changed))
-        goto cleanup;
+    if (edit->verify != NULL) {
+        failure = edit->verification_error;
+        FILE *candidate = open_native(temp);
+        if (candidate == NULL)
+            goto cleanup;
+        bool verified = edit->verify(candidate, context) && !ferror(candidate);
+        fclose(candidate);
+        if (!verified)
+            goto cleanup;
+    }
 
 #ifndef _WIN32
     failure = "Could not create a configuration backup in the original folder.";
@@ -593,7 +564,478 @@ cleanup:
     free(temp);
     free(backup);
     free(name);
-    SDL_free(encoded_image);
-    SDL_free(encoded_folder);
     return saved;
+}
+
+typedef struct {
+    SettingEdit *edits;
+    PathVerification paths;
+} BackgroundEdit;
+
+static const char *write_background_edit(FILE *file, const char *bytes, size_t size, void *context)
+{
+    BackgroundEdit *edit = context;
+    ConfigScan scan = { .bytes = bytes, .size = size, .edits = edit->edits, .edit_count = EDIT_COUNT };
+    if (ini_parse_stream(scan_line, &scan, locate_setting, &scan) < 0)
+        return "Could not read the existing configuration.";
+    if (!write_updated_config(file, &scan))
+        return "Could not write the background settings.";
+    return NULL;
+}
+
+static bool verify_background_edit(FILE *file, void *context)
+{
+    BackgroundEdit *edit = context;
+    PathVerification *paths = &edit->paths;
+    // Quoted paths still follow inih's inline comment and line length rules.
+    return ini_parse_file(file, verify_path_value, paths) >= 0 &&
+        (paths->image == NULL || paths->image_matches) && (paths->folder == NULL || paths->folder_matches);
+}
+
+bool save_background_config(const char *path, const BackgroundSettings *settings,
+    const BackgroundSettings *previous, char *error, size_t error_size)
+{
+    char duration[20], transition[20];
+    SDL_snprintf(duration, sizeof(duration), "%u", (unsigned)(settings->image_duration / 1000));
+    SDL_snprintf(transition, sizeof(transition), "%u.%03u",
+        (unsigned)(settings->transition_time / 1000), (unsigned)(settings->transition_time % 1000));
+    SettingEdit edits[EDIT_COUNT] = {
+        { .key = SETTING_BACKGROUND_MODE,
+            .value = get_mode_setting(MODE_SETTING_BACKGROUND, settings->mode),
+            .changed = settings->mode != previous->mode },
+        { .key = SETTING_COLLAGE_LAYOUT,
+            .value = get_mode_setting(MODE_SETTING_COLLAGE_LAYOUT, settings->layout),
+            .changed = settings->layout != previous->layout },
+        { .key = SETTING_SLIDESHOW_IMAGE_DURATION, .value = duration,
+            .changed = settings->image_duration != previous->image_duration },
+        { .key = SETTING_SLIDESHOW_TRANSITION_TIME, .value = transition,
+            .changed = settings->transition_time != previous->transition_time },
+        { .key = SETTING_BACKGROUND_IMAGE,
+            .changed = strcmp(configured_path(settings->image_path), configured_path(previous->image_path)) != 0 },
+        { .key = SETTING_SLIDESHOW_DIRECTORY,
+            .changed = strcmp(configured_path(settings->folder_path), configured_path(previous->folder_path)) != 0 }
+    };
+
+    bool changed = false;
+    for (size_t i = 0; i < SDL_arraysize(edits); i++)
+        changed |= edits[i].changed;
+    if (!changed)
+        return true;
+
+    bool image_changed = edits[EDIT_IMAGE].changed, folder_changed = edits[EDIT_FOLDER].changed;
+    char *image = image_changed ? encode_config_path(settings->image_path) : NULL;
+    char *folder = folder_changed ? encode_config_path(settings->folder_path) : NULL;
+    const char *path_error = "The selected photo or folder path could not be saved in the INI file.";
+    bool saved = false;
+    if ((image_changed && image == NULL) || (folder_changed && folder == NULL)) {
+        if (error != NULL && error_size > 0)
+            SDL_snprintf(error, error_size, "%s", path_error);
+    } else {
+        edits[EDIT_IMAGE].value = image;
+        edits[EDIT_FOLDER].value = folder;
+        BackgroundEdit background = {
+            .edits = edits,
+            .paths = {
+                .image = image_changed ? configured_path(settings->image_path) : NULL,
+                .folder = folder_changed ? configured_path(settings->folder_path) : NULL
+            }
+        };
+        const ConfigEdit edit = {
+            .write = write_background_edit,
+            .verify = image_changed || folder_changed ? verify_background_edit : NULL,
+            .verification_error = path_error
+        };
+        saved = update_config_file(path, &edit, &background, error, error_size);
+    }
+    SDL_free(image);
+    SDL_free(folder);
+    return saved;
+}
+
+typedef struct {
+    const char *name;
+    const Entry *entries;
+    const Entry *previous;
+} MenuEdit;
+
+typedef struct {
+    const Entry *original;
+    char *continuation_key;
+    size_t start;
+    size_t key_start;
+    size_t value_start;
+    size_t value_end;
+    size_t end;
+    size_t destination;
+    bool empty_key;
+    bool has_continuation;
+} MenuRecord;
+
+typedef struct {
+    const Entry *entry;
+    MenuRecord *source;
+    bool unchanged;
+} MenuTarget;
+
+typedef struct {
+    ConfigScan input;
+    const char *name;
+    const Entry *remaining;
+    const char *failure;
+    MenuRecord *records;
+    size_t count;
+    size_t capacity;
+    size_t last_key;
+    size_t menu_end;
+    size_t next_key;
+    bool tail_resets_key;
+} MenuScan;
+
+static const char *const menu_conflict = "The menu changed on disk. Restart the launcher before editing it.";
+static const char *const menu_encoding_error = "An app's name, icon path or command could not be saved in the INI format.";
+
+static bool same_entry(const Entry *first, const Entry *second)
+{
+    return first->title != NULL && second->title != NULL && first->icon_path != NULL &&
+        second->icon_path != NULL && first->cmd != NULL && second->cmd != NULL &&
+        strcmp(first->title, second->title) == 0 && strcmp(first->icon_path, second->icon_path) == 0 &&
+        strcmp(first->cmd, second->cmd) == 0;
+}
+
+static bool valid_entry(const Entry *entry)
+{
+    return entry->title != NULL && entry->title[0] != '\0' && strpbrk(entry->title, ";\r\n") == NULL &&
+        entry->icon_path != NULL && entry->icon_path[0] != '\0' && strpbrk(entry->icon_path, ";\r\n") == NULL &&
+        entry->cmd != NULL && entry->cmd[0] != '\0' && strpbrk(entry->cmd, "\r\n") == NULL;
+}
+
+static MenuRecord *add_menu_record(MenuScan *scan)
+{
+    if (scan->count == scan->capacity) {
+        size_t capacity = scan->capacity == 0 ? 8 : scan->capacity * 2;
+        if (capacity < scan->capacity || capacity > SIZE_MAX / sizeof(*scan->records))
+            return NULL;
+        MenuRecord *records = SDL_realloc(scan->records, capacity * sizeof(*records));
+        if (records == NULL)
+            return NULL;
+        scan->records = records;
+        scan->capacity = capacity;
+    }
+    return &scan->records[scan->count++];
+}
+
+static int scan_menu_entry(void *context, const char *section, const char *key, const char *value)
+{
+    MenuScan *scan = context;
+    if (scan->failure != NULL || strcmp(section, scan->name) != 0 || key == NULL || value == NULL) {
+        scan->last_key = SIZE_MAX;
+        return 1;
+    }
+
+    size_t start = scan->input.line_start;
+    size_t end = scan_line_end(&scan->input);
+    scan->menu_end = end;
+    size_t value_start, value_end;
+    if (!scan_value_range(&scan->input, value, &value_start, &value_end)) {
+        scan->failure = "Could not locate the menu entries in the INI file.";
+        return 1;
+    }
+
+    size_t key_start = start;
+    while (key_start < value_start && isspace((unsigned char)scan->input.bytes[key_start]))
+        key_start++;
+    bool continuation = key_start == value_start;
+    scan->tail_resets_key = !continuation && key[0] == '\0';
+    if (!continuation) {
+        scan->last_key = SIZE_MAX;
+        if (strncmp(key, "Entry", 5) == 0 && key[5] >= '1' && key[5] <= '9') {
+            char *suffix;
+            unsigned long long number = strtoull(key + 5, &suffix, 10);
+            if (*suffix == '\0' && number < SIZE_MAX / 2 && number >= scan->next_key)
+                scan->next_key = (size_t)number + 1;
+        }
+    } else if (scan->last_key != SIZE_MAX) {
+        scan->records[scan->last_key].has_continuation = true;
+    }
+
+    Entry parsed;
+    if (!parse_menu_entry(value, &parsed))
+        return 1;
+    bool matches = scan->remaining != NULL && same_entry(&parsed, scan->remaining);
+    clear_menu_entry(&parsed);
+    if (!matches) {
+        scan->failure = menu_conflict;
+        return 1;
+    }
+
+    MenuRecord *record = add_menu_record(scan);
+    if (record == NULL) {
+        scan->failure = "Could not allocate memory for the menu configuration.";
+        return 1;
+    }
+    *record = (MenuRecord){
+        .original = scan->remaining, .start = start, .key_start = key_start, .end = end,
+        .value_start = value_start, .value_end = value_end, .destination = SIZE_MAX,
+        .empty_key = scan->tail_resets_key,
+        .continuation_key = continuation ? SDL_strdup(key) : NULL
+    };
+    if (continuation && record->continuation_key == NULL)
+        scan->failure = "Could not allocate memory for the menu configuration.";
+    if (!continuation)
+        scan->last_key = scan->count - 1;
+    scan->remaining = scan->remaining->next;
+    return 1;
+}
+
+static MenuTarget *match_menu_records(MenuScan *scan, const Entry *entries, size_t count)
+{
+    if (count == 0 || count > SIZE_MAX / sizeof(MenuTarget))
+        return NULL;
+    MenuTarget *targets = SDL_calloc(count, sizeof(*targets));
+    if (targets == NULL)
+        return NULL;
+
+    // Match unchanged entries first, including repeated entries, so we can use
+    // their original keys, quoting, and comments even if the user moves them.
+    size_t index = 0;
+    for (const Entry *entry = entries; entry != NULL; entry = entry->next, index++) {
+        targets[index].entry = entry;
+        for (size_t i = 0; i < scan->count; i++) {
+            MenuRecord *record = &scan->records[i];
+            if (record->destination == SIZE_MAX && same_entry(entry, record->original)) {
+                record->destination = index;
+                targets[index].source = record;
+                targets[index].unchanged = true;
+                break;
+            }
+        }
+    }
+
+    // Use the remaining INI records for edits before creating new assignment keys.
+    size_t next = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (targets[i].source != NULL)
+            continue;
+        while (next < scan->count && scan->records[next].destination != SIZE_MAX)
+            next++;
+        if (next == scan->count)
+            break;
+        MenuRecord *record = &scan->records[next++];
+        record->destination = i;
+        targets[i].source = record;
+    }
+    return targets;
+}
+
+static bool write_menu_target(FILE *file, MenuScan *scan, const MenuTarget *target,
+    bool moved, bool dedent)
+{
+    const char *bytes = scan->input.bytes;
+    const MenuRecord *record = target->source;
+    if (record == NULL || (moved && record->empty_key)) {
+        if (fprintf(file, "Entry%zu=", scan->next_key++) < 0)
+            return false;
+    } else if (moved && record->continuation_key != NULL) {
+        if (fprintf(file, "%s=", record->continuation_key) < 0)
+            return false;
+    } else {
+        size_t start = moved || dedent ? record->key_start : record->start;
+        if (!put_bytes(file, bytes + start, record->value_start - start))
+            return false;
+    }
+
+    if (target->unchanged) {
+        if (!put_bytes(file, bytes + record->value_start, record->value_end - record->value_start))
+            return false;
+    } else {
+        const Entry *entry = target->entry;
+        char *path = encode_config_path(entry->icon_path);
+        bool written = path != NULL && fprintf(file, "%s;%s;%s", entry->title, path, entry->cmd) >= 0;
+        SDL_free(path);
+        if (!written)
+            return false;
+    }
+
+    if (record != NULL && !put_bytes(file, bytes + record->value_end, record->end - record->value_end))
+        return false;
+    return !moved || (record != NULL && bytes[record->end - 1] == '\n') ||
+        fputs(config_line_break(bytes), file) != EOF;
+}
+
+static bool omit_menu_record(FILE *file, const char *bytes, const MenuRecord *record, bool keep_key)
+{
+    size_t suffix = record->value_end;
+    while (suffix < record->end && isspace((unsigned char)bytes[suffix]))
+        suffix++;
+    bool has_comment = suffix < record->end && bytes[suffix] == ';';
+    if (keep_key) {
+        if (record->continuation_key != NULL) {
+            if (fprintf(file, "%s=", record->continuation_key) < 0)
+                return false;
+        } else if (!put_bytes(file, bytes + record->start, record->value_start - record->start)) {
+            return false;
+        }
+    }
+    if (record->destination == SIZE_MAX && has_comment)
+        return put_bytes(file, bytes + record->value_end, record->end - record->value_end);
+    if (keep_key && bytes[record->end - 1] == '\n') {
+        size_t newline = record->end - 1;
+        if (newline > record->value_end && bytes[newline - 1] == '\r')
+            newline--;
+        return put_bytes(file, bytes + newline, record->end - newline);
+    }
+    return true;
+}
+
+static bool write_menu_records(FILE *file, MenuScan *scan, const MenuTarget *targets, size_t count)
+{
+    const char *bytes = scan->input.bytes;
+    size_t next = 0, offset = 0;
+    for (size_t i = 0; i < scan->count; i++) {
+        const MenuRecord *record = &scan->records[i];
+        if (!put_bytes(file, bytes + offset, record->start - offset))
+            return false;
+
+        size_t destination = record->destination;
+        if (destination == SIZE_MAX || destination < next) {
+            // A following continuation still needs its key. An empty menu
+            // likewise needs one assignment so the launcher creates it.
+            bool keep_key = record->empty_key || record->has_continuation || (count == 0 && i + 1 == scan->count);
+            if (!omit_menu_record(file, bytes, record, keep_key))
+                return false;
+        } else {
+            bool inserting = next < destination;
+            while (next < destination) {
+                if (!write_menu_target(file, scan, &targets[next++], true, false))
+                    return false;
+            }
+            bool dedent = inserting && record->continuation_key == NULL;
+            if (!write_menu_target(file, scan, &targets[next++], false, dedent))
+                return false;
+        }
+        offset = record->end;
+    }
+
+    size_t tail = scan->menu_end != 0 ? scan->menu_end : scan->input.size;
+    if (!put_bytes(file, bytes + offset, tail - offset))
+        return false;
+    if (next < count) {
+        const char *line_break = config_line_break(bytes);
+        if (tail != 0 && bytes[tail - 1] != '\n' && fputs(line_break, file) == EOF)
+            return false;
+        if (scan->menu_end == 0 && fprintf(file, "[%s]%s", scan->name, line_break) < 0)
+            return false;
+        while (next < count) {
+            if (!write_menu_target(file, scan, &targets[next++], true, false))
+                return false;
+        }
+        // An empty key resets continuation parsing for any following raw lines.
+        if (tail < scan->input.size && scan->tail_resets_key && fprintf(file, "=%s", line_break) < 0)
+            return false;
+    }
+    return put_bytes(file, bytes + tail, scan->input.size - tail);
+}
+
+static const char *write_menu_edit(FILE *file, const char *bytes, size_t size, void *context)
+{
+    const MenuEdit *edit = context;
+    MenuScan scan = {
+        .input = { .bytes = bytes, .size = size }, .name = edit->name, .remaining = edit->previous,
+        .last_key = SIZE_MAX, .next_key = 1
+    };
+    size_t count = 0;
+    for (const Entry *entry = edit->entries; entry != NULL; entry = entry->next)
+        count++;
+
+    int result = ini_parse_stream(scan_line, &scan.input, scan_menu_entry, &scan);
+    const char *failure = scan.failure;
+    if (failure == NULL && result < 0)
+        failure = "Could not read the existing configuration.";
+    if (failure == NULL && scan.remaining != NULL)
+        failure = menu_conflict;
+
+    MenuTarget *targets = NULL;
+    if (failure == NULL && count != 0) {
+        targets = match_menu_records(&scan, edit->entries, count);
+        if (targets == NULL)
+            failure = "Could not allocate memory for the menu configuration.";
+        else {
+            for (size_t i = 0; i < count; i++) {
+                if (!targets[i].unchanged && !valid_entry(targets[i].entry)) {
+                    failure = menu_encoding_error;
+                    break;
+                }
+            }
+        }
+    }
+    if (failure == NULL && !write_menu_records(file, &scan, targets, count))
+        failure = "Could not write the menu configuration.";
+
+    SDL_free(targets);
+    for (size_t i = 0; i < scan.count; i++)
+        SDL_free(scan.records[i].continuation_key);
+    SDL_free(scan.records);
+    return failure;
+}
+
+typedef struct {
+    const char *name;
+    const Entry *remaining;
+    bool found;
+    bool mismatch;
+} MenuVerification;
+
+static int verify_menu_entry(void *context, const char *section, const char *key, const char *value)
+{
+    MenuVerification *menu = context;
+    if (menu->mismatch || strcmp(section, menu->name) != 0 || key == NULL || value == NULL)
+        return 1;
+
+    menu->found = true; // Any assignment keeps an empty menu addressable.
+    Entry parsed;
+    if (parse_menu_entry(value, &parsed)) {
+        if (menu->remaining != NULL && same_entry(&parsed, menu->remaining))
+            menu->remaining = menu->remaining->next;
+        else
+            menu->mismatch = true;
+        clear_menu_entry(&parsed);
+    }
+    return 1;
+}
+
+static bool verify_menu_edit(FILE *file, void *context)
+{
+    const MenuEdit *edit = context;
+    MenuVerification menu = { .name = edit->name, .remaining = edit->entries };
+    return ini_parse_file(file, verify_menu_entry, &menu) >= 0 &&
+        !menu.mismatch && menu.remaining == NULL && menu.found;
+}
+
+bool save_menu_config(const char *path, const char *menu_name, const Entry *entries,
+    const Entry *previous, char *error, size_t error_size)
+{
+    if (menu_name == NULL || menu_name[0] == '\0' || strpbrk(menu_name, "]\r\n") != NULL) {
+        if (error != NULL && error_size > 0)
+            SDL_snprintf(error, error_size, "The menu name could not be saved in the INI file.");
+        return false;
+    }
+
+    bool unchanged = true;
+    const Entry *old = previous;
+    for (const Entry *entry = entries; entry != NULL; entry = entry->next) {
+        if (old == NULL || !same_entry(entry, old))
+            unchanged = false;
+        if (old != NULL)
+            old = old->next;
+    }
+    if (unchanged && old == NULL) {
+        if (error != NULL && error_size > 0)
+            error[0] = '\0';
+        return true;
+    }
+    MenuEdit menu = { .name = menu_name, .entries = entries, .previous = previous };
+    const ConfigEdit edit = {
+        .write = write_menu_edit, .verify = verify_menu_edit, .verification_error = menu_encoding_error
+    };
+    return update_config_file(path, &edit, &menu, error, error_size);
 }

@@ -1,5 +1,5 @@
 # @PROJECT_NAME@ v@PROJECT_VERSION@ sample configuration file
-# The Settings gear opens Background settings and the photo gallery.
+# The Settings gear opens Backgrounds and Applications and Icons.
 # For documentation of these settings, visit: https://complexlogic.github.io/flex-launcher/configuration
 [General]
 @SETTING_DEFAULT_MENU@=@DEFAULT_MENU@

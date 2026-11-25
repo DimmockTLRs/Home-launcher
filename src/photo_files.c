@@ -51,6 +51,25 @@ static const char *file_name(const char *path)
     return last != NULL ? last + 1 : path;
 }
 
+static char *join_utf8_path(const char *folder, const char *name)
+{
+    size_t folder_length = strlen(folder);
+    size_t name_length = strlen(name);
+    bool add_separator = folder_length != 0 && folder[folder_length - 1] != '/' &&
+        folder[folder_length - 1] != PATH_SEPARATOR[0];
+    if (folder_length > SIZE_MAX - name_length - 2)
+        return NULL;
+
+    char *path = malloc(folder_length + name_length + 2);
+    if (path != NULL) {
+        memcpy(path, folder, folder_length);
+        if (add_separator)
+            path[folder_length++] = PATH_SEPARATOR[0];
+        memcpy(path + folder_length, name, name_length + 1);
+    }
+    return path;
+}
+
 static bool valid_photo_name(const char *name)
 {
 #ifdef _WIN32
@@ -169,16 +188,36 @@ static char *item_path(IShellItem *item)
     return converted;
 }
 
-static HRESULT get_chosen_folder(IFileOpenDialog *dialog, char **folder)
+typedef enum {
+    BACKGROUND_FOLDER,
+    BACKGROUND_PHOTOS,
+    APP_EXECUTABLE,
+    APP_ICON
+} PickerKind;
+
+static bool valid_executable_name(const char *name)
+{
+    const char *extension = strrchr(name, '.');
+    return strchr(name, ':') == NULL && extension != NULL &&
+        (!SDL_strcasecmp(extension, ".exe") || !SDL_strcasecmp(extension, ".lnk"));
+}
+
+static HRESULT get_chosen_path(IFileOpenDialog *dialog, PickerKind kind, char **path)
 {
     IShellItem *item = NULL;
     HRESULT result = IFileOpenDialog_GetResult(dialog, &item);
-    if (SUCCEEDED(result)) {
-        *folder = item_path(item);
-        IShellItem_Release(item);
-        if (*folder == NULL)
-            result = E_FAIL;
+    if (FAILED(result))
+        return result;
+    char *chosen = item_path(item);
+    IShellItem_Release(item);
+    if (chosen == NULL)
+        return E_FAIL;
+    if ((kind == APP_EXECUTABLE && !valid_executable_name(file_name(chosen))) ||
+        (kind == APP_ICON && !valid_photo_name(file_name(chosen)))) {
+        free(chosen);
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     }
+    *path = chosen;
     return result;
 }
 
@@ -225,20 +264,32 @@ static HRESULT get_chosen_photos(IFileOpenDialog *dialog, PhotoList *files)
     return result;
 }
 
-static PhotoPickResult show_photo_picker(SDL_Window *window, char **folder, PhotoList *photos,
-    char *error, size_t size)
+static PhotoPickResult show_picker(SDL_Window *window, PickerKind kind, char **path,
+    PhotoList *photos, char *error, size_t size)
 {
+    static const wchar_t *const titles[] = {
+        [BACKGROUND_FOLDER] = L"Choose background folder",
+        [BACKGROUND_PHOTOS] = L"Add photos",
+        [APP_EXECUTABLE] = L"Choose an application",
+        [APP_ICON] = L"Choose an app icon"
+    };
+    static const COMDLG_FILTERSPEC photo_types[] = {
+        {L"Photos (JPEG, PNG, WebP)", L"*.jpg;*.jpeg;*.png;*.webp"}
+    };
+    static const COMDLG_FILTERSPEC executable_types[] = {
+        {L"Applications and shortcuts", L"*.exe;*.lnk"}
+    };
     set_error(error, size, "");
     SDL_SysWMinfo window_info;
     SDL_VERSION(&window_info.version);
     if (!SDL_GetWindowWMInfo(window, &window_info) || window_info.subsystem != SDL_SYSWM_WINDOWS) {
-        set_error(error, size, "Could not find the launcher window for the photo picker.");
+        set_error(error, size, "Could not find the launcher window for the Windows picker.");
         return PHOTO_PICK_ERROR;
     }
 
     HRESULT result = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(result)) {
-        set_error(error, size, "Could not start the Windows photo picker.");
+        set_error(error, size, "Could not start the Windows picker.");
         return PHOTO_PICK_ERROR;
     }
 
@@ -250,19 +301,24 @@ static PhotoPickResult show_photo_picker(SDL_Window *window, char **folder, Phot
         result = IFileOpenDialog_GetOptions(dialog, &options);
         if (SUCCEEDED(result)) {
             options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR;
-            options |= folder != NULL ? FOS_PICKFOLDERS : FOS_ALLOWMULTISELECT | FOS_FILEMUSTEXIST;
+            options |= kind == BACKGROUND_FOLDER ? FOS_PICKFOLDERS : FOS_FILEMUSTEXIST;
+            if (kind == BACKGROUND_PHOTOS)
+                options |= FOS_ALLOWMULTISELECT;
+            if (kind == APP_EXECUTABLE)
+                options |= FOS_NODEREFERENCELINKS;
             result = IFileOpenDialog_SetOptions(dialog, options);
         }
         if (SUCCEEDED(result))
-            result = IFileOpenDialog_SetTitle(dialog, folder != NULL ? L"Choose background folder" : L"Add photos");
-        if (SUCCEEDED(result) && photos != NULL) {
-            COMDLG_FILTERSPEC types[] = {{L"Photos (JPEG, PNG, WebP)", L"*.jpg;*.jpeg;*.png;*.webp"}};
-            result = IFileOpenDialog_SetFileTypes(dialog, (UINT)SDL_arraysize(types), types);
+            result = IFileOpenDialog_SetTitle(dialog, titles[kind]);
+        if (SUCCEEDED(result) && kind != BACKGROUND_FOLDER) {
+            const COMDLG_FILTERSPEC *types = kind == APP_EXECUTABLE ? executable_types : photo_types;
+            result = IFileOpenDialog_SetFileTypes(dialog, 1, types);
         }
         if (SUCCEEDED(result)) {
             result = IFileOpenDialog_Show(dialog, window_info.info.win.window);
             if (SUCCEEDED(result))
-                result = folder != NULL ? get_chosen_folder(dialog, folder) : get_chosen_photos(dialog, photos);
+                result = kind == BACKGROUND_PHOTOS ? get_chosen_photos(dialog, photos) :
+                    get_chosen_path(dialog, kind, path);
             SDL_RaiseWindow(window);
         }
         IFileOpenDialog_Release(dialog);
@@ -272,8 +328,16 @@ static PhotoPickResult show_photo_picker(SDL_Window *window, char **folder, Phot
     if (result == HRESULT_FROM_WIN32(ERROR_CANCELLED))
         return PHOTO_PICK_CANCELLED;
     if (FAILED(result)) {
-        set_error(error, size, result == HRESULT_FROM_WIN32(ERROR_INVALID_DATA) ?
-            "Select JPEG, PNG or WebP photos." : "Could not open or read the Windows photo selection.");
+        const char *message = "Could not open or read the Windows selection.";
+        if (result == HRESULT_FROM_WIN32(ERROR_INVALID_DATA)) {
+            if (kind == APP_EXECUTABLE)
+                message = "Select a Windows executable (.exe) or shortcut (.lnk).";
+            else if (kind == APP_ICON)
+                message = "Select a JPEG, PNG or WebP app icon.";
+            else
+                message = "Select JPEG, PNG or WebP photos.";
+        }
+        set_error(error, size, message);
         return PHOTO_PICK_ERROR;
     }
     return PHOTO_PICK_OK;
@@ -282,13 +346,25 @@ static PhotoPickResult show_photo_picker(SDL_Window *window, char **folder, Phot
 PhotoPickResult pick_photo_folder(SDL_Window *window, char **folder, char *error, size_t size)
 {
     *folder = NULL;
-    return show_photo_picker(window, folder, NULL, error, size);
+    return show_picker(window, BACKGROUND_FOLDER, folder, NULL, error, size);
 }
 
 PhotoPickResult pick_photo_files(SDL_Window *window, PhotoList *files, char *error, size_t size)
 {
     *files = (PhotoList){0};
-    return show_photo_picker(window, NULL, files, error, size);
+    return show_picker(window, BACKGROUND_PHOTOS, NULL, files, error, size);
+}
+
+PhotoPickResult pick_app_executable(SDL_Window *window, char **path, char *error, size_t size)
+{
+    *path = NULL;
+    return show_picker(window, APP_EXECUTABLE, path, NULL, error, size);
+}
+
+PhotoPickResult pick_app_icon(SDL_Window *window, char **path, char *error, size_t size)
+{
+    *path = NULL;
+    return show_picker(window, APP_ICON, path, NULL, error, size);
 }
 
 static FILE *open_photo_source(const wchar_t *path)
@@ -348,7 +424,7 @@ static FILE *open_import_temp(const wchar_t *folder, wchar_t **temporary)
 }
 
 static bool publish_photo(const wchar_t *temp, const wchar_t *folder, const char *name,
-    char *error, size_t size)
+    char **imported_path, char *error, size_t size)
 {
     for (int sequence = 1; sequence <= PHOTO_CONFLICT_LIMIT; sequence++) {
         char *candidate = copy_name(name, sequence);
@@ -359,27 +435,36 @@ static bool publish_photo(const wchar_t *temp, const wchar_t *folder, const char
         if (destination == NULL)
             return fail(error, size, "Could not allocate an import filename.");
 
+        char *published = imported_path != NULL ? utf8_path(destination) : NULL;
+        if (imported_path != NULL && published == NULL) {
+            free(destination);
+            return fail(error, size, "Could not allocate an import filename.");
+        }
         if (MoveFileExW(temp, destination, MOVEFILE_WRITE_THROUGH)) {
             free(destination);
+            if (imported_path != NULL)
+                *imported_path = published;
             return true;
         }
         DWORD last = GetLastError();
         bool conflict = last == ERROR_FILE_EXISTS || last == ERROR_ALREADY_EXISTS ||
             GetFileAttributesW(destination) != INVALID_FILE_ATTRIBUTES;
         free(destination);
+        free(published);
         if (!conflict) {
-            windows_error(error, size, "Could not place the photo in the background folder", last);
+            windows_error(error, size, "Could not place the image in the destination folder", last);
             return false;
         }
     }
     return fail(error, size, "Too many photos already have this filename.");
 }
 
-bool copy_photo_into_folder(const char *source, const char *folder, char *error, size_t size)
+static bool copy_photo_file(const char *source, const char *folder, char **imported_path,
+    char *error, size_t size)
 {
     const char *name = file_name(source);
     if (!valid_photo_name(name))
-        return fail(error, size, "Select a JPEG, PNG or WebP photo.");
+        return fail(error, size, "Select a JPEG, PNG or WebP image.");
 
     wchar_t *input = wide_path(source);
     wchar_t *directory = wide_path(folder);
@@ -387,17 +472,17 @@ bool copy_photo_into_folder(const char *source, const char *folder, char *error,
     bool copied = false;
     FILE *photo = input != NULL ? open_photo_source(input) : NULL;
     if (photo == NULL)
-        set_error(error, size, "Could not open the selected photo.");
+        set_error(error, size, "Could not open the selected image.");
     else {
         FILE *target = directory != NULL ? open_import_temp(directory, &temporary) : NULL;
         if (target == NULL)
-            set_error(error, size, "Could not write to the background folder. Check that it exists and is writable.");
+            set_error(error, size, "Could not write to the destination folder. Check that it exists and is writable.");
         else {
             bool written = write_photo(photo, target) && _commit(_fileno(target)) == 0;
             if (fclose(target) != 0 || !written)
-                set_error(error, size, "Could not finish copying the photo. Check available space.");
+                set_error(error, size, "Could not finish copying the image. Check available space.");
             else
-                copied = publish_photo(temporary, directory, name, error, size);
+                copied = publish_photo(temporary, directory, name, imported_path, error, size);
         }
         fclose(photo);
     }
@@ -408,6 +493,20 @@ bool copy_photo_into_folder(const char *source, const char *folder, char *error,
     free(directory);
     free(input);
     return copied;
+}
+
+static bool create_icon_folder(const char *path)
+{
+    wchar_t *native = wide_path(path);
+    if (native == NULL)
+        return false;
+    bool success = CreateDirectoryW(native, NULL) != 0;
+    if (!success && GetLastError() == ERROR_ALREADY_EXISTS) {
+        DWORD attributes = GetFileAttributesW(native);
+        success = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+    }
+    free(native);
+    return success;
 }
 
 static bool normal_file(HANDLE handle, bool directory)
@@ -619,6 +718,22 @@ PhotoPickResult pick_photo_files(SDL_Window *window, PhotoList *files, char *err
     return PHOTO_PICK_ERROR;
 }
 
+PhotoPickResult pick_app_executable(SDL_Window *window, char **path, char *error, size_t size)
+{
+    (void)window;
+    *path = NULL;
+    set_error(error, size, "The native application picker is available on Windows.");
+    return PHOTO_PICK_ERROR;
+}
+
+PhotoPickResult pick_app_icon(SDL_Window *window, char **path, char *error, size_t size)
+{
+    (void)window;
+    *path = NULL;
+    set_error(error, size, "The native icon picker is available on Windows.");
+    return PHOTO_PICK_ERROR;
+}
+
 static FILE *open_photo_source(const char *path)
 {
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
@@ -650,45 +765,55 @@ static FILE *open_import_temp(int folder, char *temporary, size_t size)
     return NULL;
 }
 
-static bool publish_photo(int folder, const char *temporary, const char *name,
-    char *error, size_t size)
+static bool publish_photo(int folder, const char *folder_path, const char *temporary,
+    const char *name, char **imported_path, char *error, size_t size)
 {
     for (int sequence = 1; sequence <= PHOTO_CONFLICT_LIMIT; sequence++) {
         char *candidate = copy_name(name, sequence);
         if (candidate == NULL)
             return fail(error, size, "Could not allocate an import filename.");
+        char *published = imported_path != NULL ? join_utf8_path(folder_path, candidate) : NULL;
+        if (imported_path != NULL && published == NULL) {
+            free(candidate);
+            return fail(error, size, "Could not allocate an import filename.");
+        }
         bool moved = linkat(folder, temporary, folder, candidate, 0) == 0;
         int last = errno;
         free(candidate);
-        if (moved)
+        if (moved) {
+            if (imported_path != NULL)
+                *imported_path = published;
             return true;
+        }
+        free(published);
         if (last != EEXIST)
-            return fail(error, size, "Could not place the photo in the background folder.");
+            return fail(error, size, "Could not place the image in the destination folder.");
     }
     return fail(error, size, "Too many photos already have this filename.");
 }
 
-bool copy_photo_into_folder(const char *source, const char *folder, char *error, size_t size)
+static bool copy_photo_file(const char *source, const char *folder, char **imported_path,
+    char *error, size_t size)
 {
     const char *name = file_name(source);
     if (!valid_photo_name(name))
-        return fail(error, size, "Select a JPEG, PNG or WebP photo.");
+        return fail(error, size, "Select a JPEG, PNG or WebP image.");
     FILE *photo = open_photo_source(source);
     if (photo == NULL)
-        return fail(error, size, "Could not open the selected photo.");
+        return fail(error, size, "Could not open the selected image.");
 
     int directory = open(folder, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     char temporary[96] = {0};
     FILE *target = directory >= 0 ? open_import_temp(directory, temporary, sizeof(temporary)) : NULL;
     bool copied = false;
     if (target == NULL)
-        set_error(error, size, "Could not write to the background folder. Check that it exists and is writable.");
+        set_error(error, size, "Could not write to the destination folder. Check that it exists and is writable.");
     else {
         bool written = write_photo(photo, target) && fsync(fileno(target)) == 0;
         if (fclose(target) != 0 || !written)
-            set_error(error, size, "Could not finish copying the photo. Check available space.");
+            set_error(error, size, "Could not finish copying the image. Check available space.");
         else
-            copied = publish_photo(directory, temporary, name, error, size);
+            copied = publish_photo(directory, folder, temporary, name, imported_path, error, size);
     }
     if (temporary[0] != '\0')
         unlinkat(directory, temporary, 0);
@@ -696,6 +821,14 @@ bool copy_photo_into_folder(const char *source, const char *folder, char *error,
         close(directory);
     fclose(photo);
     return copied;
+}
+
+static bool create_icon_folder(const char *path)
+{
+    if (mkdir(path, 0700) == 0)
+        return true;
+    struct stat info;
+    return errno == EEXIST && stat(path, &info) == 0 && S_ISDIR(info.st_mode);
 }
 
 static int open_parent(const char *path, const char *name)
@@ -742,3 +875,40 @@ bool remove_managed_photo(const char *path, const char *folder, char *error, siz
 }
 
 #endif
+
+bool copy_photo_into_folder(const char *source, const char *folder, char *error, size_t size)
+{
+    return copy_photo_file(source, folder, NULL, error, size);
+}
+
+char *app_icon_folder(char *error, size_t size)
+{
+    set_error(error, size, "");
+    char *preferences = SDL_GetPrefPath("DimmockTLRs", "Home Launcher");
+    if (preferences == NULL) {
+        set_error(error, size, "Could not find the launcher data folder for app icons.");
+        return NULL;
+    }
+    char *folder = join_utf8_path(preferences, "icons");
+    SDL_free(preferences);
+    if (folder == NULL || !create_icon_folder(folder)) {
+        free(folder);
+        set_error(error, size, "Could not create or open the app icon library.");
+        return NULL;
+    }
+    return folder;
+}
+
+bool import_app_icon(const char *source, char **imported_path, char *error, size_t size)
+{
+    *imported_path = NULL;
+    if (!valid_photo_name(file_name(source)))
+        return fail(error, size, "Select a JPEG, PNG or WebP app icon.");
+
+    char *folder = app_icon_folder(error, size);
+    if (folder == NULL)
+        return false;
+    bool copied = copy_photo_file(source, folder, imported_path, error, size);
+    free(folder);
+    return copied;
+}

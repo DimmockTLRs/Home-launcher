@@ -16,4 +16,7 @@ FILE *open_launcher_config(const char *path);
 bool save_background_config(const char *path, const BackgroundSettings *settings,
     const BackgroundSettings *previous, char *error, size_t error_size);
 
+bool save_menu_config(const char *path, const char *menu_name, const Entry *entries,
+    const Entry *previous, char *error, size_t error_size);
+
 #endif

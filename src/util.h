@@ -23,6 +23,10 @@ struct gamepad_info {
 };
 
 int config_handler(void *user, const char *section, const char *name, const char *value);
+bool parse_menu_entry(const char *value, Entry *entry);
+void clear_menu_entry(Entry *entry);
+void free_menu_entries(Entry *entries);
+bool clone_menu_entries(const Entry *entries, const Entry *stop, Entry **copies);
 int convert_percent(const char *string, int max_value);
 const char *get_mode_setting(int type, int value);
 int utf8_length(const char *string);

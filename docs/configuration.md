@@ -42,7 +42,7 @@ A line can be commented out by using the # character at the beginning of the lin
 
 ## On-screen settings
 
-Open the gear card at the end of the home menu to edit background settings. You can also press F1 on the home menu if you have no F1 hotkey. Use Up and Down to move, Left and Right to adjust, and Enter or your controller's Select button to choose an action. You can also click the controls. Back or Escape discards unsaved changes.
+Open the gear card at the end of the home menu to edit settings. You can also press F1 on the home menu if you have no F1 hotkey. Use Up and Down to move, Left and Right to adjust, and Enter or your controller's Select button to choose an action. You can also click the controls. Back or Escape discards unsaved changes.
 
 The Backgrounds screen can switch among Solid colour, Single image, Slideshow and Collage. It also controls the collage layout, photo duration and fade duration.
 
@@ -53,6 +53,14 @@ Select a thumbnail to preview it and choose **Use as background** to set it as t
 The gallery reads photos directly inside the selected folder and prepares only the visible page of thumbnails. On Linux, the gallery can browse a folder already configured in the INI. The native folder and file pickers are available in the Windows build.
 
 Choose **Save and return** to apply the settings and update the INI file used at launch, including any file specified with `--config`. The save preserves other settings, comments and custom entries, and keeps the previous file beside it as `config.ini.bak` (or the equivalent for a custom filename). If the file cannot be written, the screen keeps your draft and shows the error.
+
+### Applications and Icons
+
+From Settings, open **Applications and Icons** to edit the cards on Home. **Add application** opens the same form used to edit an existing card. **Choose program** on Windows accepts an `.exe` or `.lnk` shortcut. You can also enter a **Launch command** or add an HTTP or HTTPS address with **Website URL**. Website cards open in your default browser.
+
+**Import icon** on Windows copies a JPEG, PNG or WebP file into your user data folder. Imported icons stay available in **Icon library** for any card. The preview shows the icon fitted to a TV card, and removing a card leaves its program and icon files on disk.
+
+Choose **Done** to stage each edit. Select a card and use **Move up**, **Move down**, or **Remove** to change the Home list. **Save and return** applies the updated cards and order immediately and preserves other menus and settings in the INI. Use a keyboard or paste when entering names, commands or addresses.
 
 ## Settings
 The following sections contain settings that control the look and behavior of the launcher:
@@ -451,6 +459,9 @@ Special commands are commands that are internal to Flex Launcher and begin with 
 
 #### :submenu
 Change to a different menu. Requires a menu title as an argument. For example, the command `:submenu Games` will change to the menu `Games`. The argument must be a valid menu title that is defined elsewhere in the config file.
+
+#### :website
+Open an HTTP or HTTPS URL in the default browser, for example `:website https://example.com/`. The Applications and Icons editor uses this command for website cards.
 
 #### :fork
 Forks a new process and executes a command in it without exiting the launcher. This is typically used in combination with a [hotkey](#hotkeys). Use this special command when you want to execute a command on your system for some reason other than launching a graphical application. Example use cases:

@@ -6,7 +6,6 @@
       "features": ["libjpeg-turbo", "libwebp"]
     },
     "sdl2-ttf",
-    "inih",
     "getopt"
   ]
 } 

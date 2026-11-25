@@ -6,6 +6,9 @@ set(SOURCES
   background.h
   config_save.c
   config_save.h
+  app_editor.c
+  app_editor.h
+  website.c
   settings_ui.c
   settings_ui.h
   photo_gallery.c
@@ -38,12 +41,16 @@ if (WIN32)
 endif()
 
 # Build libraries
+# Use inih r62 with enough space for an icon path and a launch command in one INI entry.
+add_library(launcher_ini STATIC external/inih/ini.c)
+target_include_directories(launcher_ini PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/external/inih")
+target_compile_definitions(launcher_ini PRIVATE INI_USE_STACK=0 INI_INITIAL_ALLOC=8192 INI_MAX_LINE=8192)
 add_subdirectory("platform")
 
 # Link libraries together 
-target_link_libraries(${EXECUTABLE_TITLE} platform)
+target_link_libraries(${EXECUTABLE_TITLE} platform launcher_ini)
 if (UNIX)
-  target_link_libraries(${EXECUTABLE_TITLE} PkgConfig::SDL2 PkgConfig::SDL2_IMAGE PkgConfig::SDL2_TTF PkgConfig::INIH m)
+  target_link_libraries(${EXECUTABLE_TITLE} PkgConfig::SDL2 PkgConfig::SDL2_IMAGE PkgConfig::SDL2_TTF m)
   find_package(CURL QUIET)
   if (TARGET CURL::libcurl)
     target_link_libraries(${EXECUTABLE_TITLE} CURL::libcurl)
@@ -55,13 +62,12 @@ else ()
   $<IF:$<TARGET_EXISTS:SDL2::SDL2>,SDL2::SDL2,SDL2::SDL2-static>
 	$<IF:$<TARGET_EXISTS:SDL2_image::SDL2_image>,SDL2_image::SDL2_image,SDL2_image::SDL2_image-static>
 	$<IF:$<TARGET_EXISTS:SDL2_ttf::SDL2_ttf>,SDL2_ttf::SDL2_ttf,SDL2_ttf::SDL2_ttf-static>
-	${INIH}
   ${GETOPT}
 	PowrProf
   winhttp
   ole32
   uuid
   )
-  target_include_directories(${EXECUTABLE_TITLE} PUBLIC ${INIH_INCLUDE_DIR} ${GETOPT_INCLUDE_DIR})
+  target_include_directories(${EXECUTABLE_TITLE} PUBLIC ${GETOPT_INCLUDE_DIR})
 endif ()
 target_include_directories(${EXECUTABLE_TITLE} SYSTEM PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/external")

@@ -57,6 +57,17 @@ SDL_Texture *load_texture_from_file(const char *path)
     return texture;
 }
 
+SDL_Texture *default_app_icon(void)
+{
+    char icon[] = "<svg viewBox='0 0 96 96'>"
+        "<rect x='10' y='16' width='76' height='64' rx='9' fill='none' "
+        "stroke='#D1E4FC' stroke-width='5'/>"
+        "<path d='M13 35 H83' fill='none' stroke='#D1E4FC' stroke-width='5'/>"
+        "<circle cx='24' cy='26' r='3' fill='#D1E4FC'/>"
+        "<circle cx='34' cy='26' r='3' fill='#D1E4FC'/></svg>";
+    return rasterize_svg(icon, -1, -1, NULL);
+}
+
 // A function to load a texture from a    SDL surface
 SDL_Texture *load_texture(SDL_Surface *surface)
 {
