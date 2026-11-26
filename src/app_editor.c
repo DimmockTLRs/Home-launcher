@@ -1238,6 +1238,9 @@ static void move_focus(int horizontal, int vertical)
     EditorAction next = editor.focus;
     for (int i = 0; i < editor.item_count; i++) {
         EditorItem *item = &editor.items[i];
+        // Rows use Right to reach their actions. The template is in the Add row above.
+        if (horizontal != 0 && editor.focus >= ITEM_ROW && item->action == ITEM_ADD_ASSISTANT)
+            continue;
         int dx = item->rect.x + item->rect.w / 2 - (origin.x + origin.w / 2);
         int dy = item->rect.y + item->rect.h / 2 - (origin.y + origin.h / 2);
         int primary = horizontal != 0 ? dx * horizontal : dy * vertical;
