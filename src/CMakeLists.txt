@@ -6,6 +6,9 @@ set(SOURCES
   background.h
   config_save.c
   config_save.h
+  appearance.h
+  appearance_ui.c
+  appearance_ui.h
   app_editor.c
   app_editor.h
   website.c

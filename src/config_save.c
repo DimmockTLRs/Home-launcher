@@ -27,9 +27,16 @@ typedef struct {
     const char *value;
     bool changed;
     bool found;
+    bool verified;
     size_t start;
     size_t end;
 } SettingEdit;
+
+typedef struct {
+    const char *name;
+    SettingEdit *edits;
+    size_t count;
+} SettingsSection;
 
 typedef struct {
     const char *bytes;
@@ -38,10 +45,10 @@ typedef struct {
     size_t line_start;
     size_t first_chunk_length;
     const char *parser_buffer;
-    size_t background_end;
-    bool has_background_entry;
-    SettingEdit *edits;
-    size_t edit_count;
+    size_t section_end;
+    bool has_section_entry;
+    bool tail_resets_key;
+    const SettingsSection *section;
 } ConfigScan;
 
 typedef enum {
@@ -300,16 +307,17 @@ static size_t scan_line_end(const ConfigScan *scan)
 static int locate_setting(void *context, const char *section, const char *name, const char *value)
 {
     ConfigScan *scan = context;
-    if (strcmp(section, "Background") != 0)
+    if (strcmp(section, scan->section->name) != 0)
         return 1;
 
-    scan->background_end = scan_line_end(scan);
-    scan->has_background_entry = true;
+    scan->section_end = scan_line_end(scan);
+    scan->has_section_entry = true;
+    scan->tail_resets_key = name != NULL && name[0] == '\0';
     if (name == NULL || value == NULL)
         return 1;
 
-    for (size_t i = 0; i < scan->edit_count; i++) {
-        SettingEdit *edit = &scan->edits[i];
+    for (size_t i = 0; i < scan->section->count; i++) {
+        SettingEdit *edit = &scan->section->edits[i];
         if (!edit->changed || strcmp(edit->key, name) != 0)
             continue;
 
@@ -343,26 +351,30 @@ static const char *config_line_break(const char *bytes)
 static bool add_missing_settings(FILE *file, const ConfigScan *scan)
 {
     const char *line_break = config_line_break(scan->bytes);
-    size_t at = scan->has_background_entry ? scan->background_end : scan->size;
+    size_t at = scan->has_section_entry ? scan->section_end : scan->size;
     if (at > 0 && scan->bytes[at - 1] != '\n' && fputs(line_break, file) == EOF)
         return false;
-    if (!scan->has_background_entry && fprintf(file, "[Background]%s", line_break) < 0)
+    if (!scan->has_section_entry && fprintf(file, "[%s]%s", scan->section->name, line_break) < 0)
         return false;
-    for (size_t i = 0; i < scan->edit_count; i++) {
-        const SettingEdit *edit = &scan->edits[i];
+    for (size_t i = 0; i < scan->section->count; i++) {
+        const SettingEdit *edit = &scan->section->edits[i];
         if (edit->changed && !edit->found && fprintf(file, "%s=%s%s", edit->key, edit->value, line_break) < 0)
             return false;
     }
-    return true;
+    // Preserve whether inih treats the following indented lines as continuations.
+    return at == scan->size || !scan->tail_resets_key || fprintf(file, "=%s", line_break) >= 0;
 }
 
 static bool write_updated_config(FILE *file, ConfigScan *scan)
 {
+    // Background has the largest set of edits we apply in one pass.
     SettingEdit *ordered[EDIT_COUNT];
+    if (scan->section->count > SDL_arraysize(ordered))
+        return false;
     size_t count = 0;
     bool insert = false;
-    for (size_t i = 0; i < scan->edit_count; i++) {
-        SettingEdit *edit = &scan->edits[i];
+    for (size_t i = 0; i < scan->section->count; i++) {
+        SettingEdit *edit = &scan->section->edits[i];
         if (!edit->changed)
             continue;
         if (!edit->found) {
@@ -378,7 +390,7 @@ static bool write_updated_config(FILE *file, ConfigScan *scan)
         ordered[slot] = edit;
     }
 
-    size_t insertion = scan->has_background_entry ? scan->background_end : scan->size;
+    size_t insertion = scan->has_section_entry ? scan->section_end : scan->size;
     size_t offset = 0;
     for (size_t i = 0; i <= count; i++) {
         size_t next = i < count ? ordered[i]->start : scan->size;
@@ -568,19 +580,24 @@ cleanup:
 }
 
 typedef struct {
-    SettingEdit *edits;
+    SettingsSection section;
     PathVerification paths;
 } BackgroundEdit;
+
+static const char *write_section_edit(FILE *file, const char *bytes, size_t size, void *context)
+{
+    ConfigScan scan = { .bytes = bytes, .size = size, .section = context };
+    if (ini_parse_stream(scan_line, &scan, locate_setting, &scan) < 0)
+        return "Could not read the existing configuration.";
+    if (!write_updated_config(file, &scan))
+        return "Could not write the configuration settings.";
+    return NULL;
+}
 
 static const char *write_background_edit(FILE *file, const char *bytes, size_t size, void *context)
 {
     BackgroundEdit *edit = context;
-    ConfigScan scan = { .bytes = bytes, .size = size, .edits = edit->edits, .edit_count = EDIT_COUNT };
-    if (ini_parse_stream(scan_line, &scan, locate_setting, &scan) < 0)
-        return "Could not read the existing configuration.";
-    if (!write_updated_config(file, &scan))
-        return "Could not write the background settings.";
-    return NULL;
+    return write_section_edit(file, bytes, size, &edit->section);
 }
 
 static bool verify_background_edit(FILE *file, void *context)
@@ -634,7 +651,7 @@ bool save_background_config(const char *path, const BackgroundSettings *settings
         edits[EDIT_IMAGE].value = image;
         edits[EDIT_FOLDER].value = folder;
         BackgroundEdit background = {
-            .edits = edits,
+            .section = { .name = "Background", .edits = edits, .count = SDL_arraysize(edits) },
             .paths = {
                 .image = image_changed ? configured_path(settings->image_path) : NULL,
                 .folder = folder_changed ? configured_path(settings->folder_path) : NULL
@@ -650,6 +667,77 @@ bool save_background_config(const char *path, const BackgroundSettings *settings
     SDL_free(image);
     SDL_free(folder);
     return saved;
+}
+
+static int verify_setting_value(void *context, const char *section, const char *name, const char *value)
+{
+    SettingsSection *settings = context;
+    if (strcmp(section, settings->name) != 0 || name == NULL || value == NULL)
+        return 1;
+
+    for (size_t i = 0; i < settings->count; i++) {
+        SettingEdit *edit = &settings->edits[i];
+        if (edit->changed && strcmp(name, edit->key) == 0) {
+            edit->verified = strcmp(value, edit->value) == 0;
+            break;
+        }
+    }
+    return 1;
+}
+
+static bool verify_section_edit(FILE *file, void *context)
+{
+    SettingsSection *settings = context;
+    if (ini_parse_file(file, verify_setting_value, settings) < 0)
+        return false;
+    for (size_t i = 0; i < settings->count; i++) {
+        const SettingEdit *edit = &settings->edits[i];
+        if (edit->changed && !edit->verified)
+            return false;
+    }
+    return true;
+}
+
+bool save_appearance_config(const char *path, bool tv_layout, const AppearanceSettings *after,
+    const AppearanceSettings *before, char *error, size_t error_size)
+{
+    bool row_changed = after->row_position != before->row_position;
+    bool scale_changed = tv_layout && after->card_scale != before->card_scale;
+    bool opacity_changed = tv_layout && after->card_opacity != before->card_opacity;
+    if (!row_changed && !scale_changed && !opacity_changed) {
+        if (error != NULL && error_size > 0)
+            error[0] = '\0';
+        return true;
+    }
+
+    bool auto_row = tv_layout && after->row_position == ROW_POSITION_AUTO;
+    int row_min = tv_layout ? 0 : CLASSIC_ROW_MIN;
+    int row_max = tv_layout ? 100 : CLASSIC_ROW_MAX;
+    if ((row_changed && !auto_row && (after->row_position < row_min || after->row_position > row_max)) ||
+        (scale_changed && (after->card_scale < TV_CARD_SCALE_MIN || after->card_scale > TV_CARD_SCALE_MAX)) ||
+        (opacity_changed && (after->card_opacity < 0 || after->card_opacity > 100))) {
+        if (error != NULL && error_size > 0)
+            SDL_snprintf(error, error_size, "The appearance settings are outside the supported range.");
+        return false;
+    }
+
+    char row[16], scale[16], opacity[16];
+    SDL_snprintf(row, sizeof(row), "%d%%", after->row_position);
+    SDL_snprintf(scale, sizeof(scale), "%d%%", after->card_scale);
+    SDL_snprintf(opacity, sizeof(opacity), "%d%%", after->card_opacity);
+    SettingEdit edits[] = {
+        { .key = tv_layout ? SETTING_TV_ROW_POSITION : SETTING_VCENTER,
+            .value = auto_row ? "Auto" : row, .changed = row_changed },
+        { .key = SETTING_TV_CARD_SCALE, .value = scale, .changed = scale_changed },
+        { .key = SETTING_TV_CARD_OPACITY, .value = opacity, .changed = opacity_changed }
+    };
+    SettingsSection section = { .name = "Layout", .edits = edits, .count = SDL_arraysize(edits) };
+    const ConfigEdit edit = {
+        .write = write_section_edit,
+        .verify = verify_section_edit,
+        .verification_error = "Could not verify the saved appearance settings."
+    };
+    return update_config_file(path, &edit, &section, error, error_size);
 }
 
 typedef struct {

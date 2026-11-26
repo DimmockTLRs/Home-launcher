@@ -165,6 +165,14 @@ static void parse_coordinate(const char *value, double limit, double *coordinate
         *coordinate = parsed;
 }
 
+static void parse_appearance_percent(const char *value, int minimum, int maximum, int *setting)
+{
+    char *end;
+    long number = strtol(value, &end, 10);
+    if (end != value && strcmp(end, "%") == 0 && number >= minimum && number <= maximum)
+        *setting = (int)number;
+}
+
 int config_handler(void *user, const char *section, const char *name, const char *value)
 {
     UNUSED(user);
@@ -236,6 +244,16 @@ int config_handler(void *user, const char *section, const char *name, const char
             if (is_percent(value))
                 copy_string(config.vcenter, value, sizeof(config.vcenter));
         }
+        else if (MATCH(name, SETTING_TV_ROW_POSITION)) {
+            if (MATCH(value, "Auto"))
+                config.appearance.row_position = ROW_POSITION_AUTO;
+            else
+                parse_appearance_percent(value, 0, 100, &config.appearance.row_position);
+        }
+        else if (MATCH(name, SETTING_TV_CARD_SCALE))
+            parse_appearance_percent(value, TV_CARD_SCALE_MIN, TV_CARD_SCALE_MAX, &config.appearance.card_scale);
+        else if (MATCH(name, SETTING_TV_CARD_OPACITY))
+            parse_appearance_percent(value, 0, 100, &config.appearance.card_opacity);
     }
 
     else if (MATCH(section, "Background")) {
@@ -979,6 +997,20 @@ void convert_percent_to_int(char *string, int *result, int max_value)
         *result = (int) ((percent / 100.0F) * (float) max_value);
 }
 
+float configured_classic_row_position(void)
+{
+    float percentage = config.vcenter[0] != '\0' ? (float)atof(config.vcenter) : CLASSIC_ROW_DEFAULT;
+    if (!(percentage >= 0 && percentage <= 100))
+        percentage = CLASSIC_ROW_DEFAULT;
+    return SDL_clamp(percentage, (float)CLASSIC_ROW_MIN, (float)CLASSIC_ROW_MAX);
+}
+
+int classic_row_margin(const Geometry *geometry, float percentage)
+{
+    int button_height = config.icon_size + config.title_padding + geometry->font_height;
+    return (int)((percentage / 100.0f) * (float)geometry->screen_height) - button_height / 2;
+}
+
 // A function to make sure all settings are in their correct range
 void validate_settings(Geometry *geo)
 {
@@ -1105,25 +1137,7 @@ void validate_settings(Geometry *geo)
         config.title_padding = title_padding;
     }
 
-    // Calculate y margin for buttons from centerline setting string, check limits
-    int vcenter = INVALID_PERCENT_VALUE;
-    int button_height = config.icon_size + config.title_padding + geo->font_height;
-    float f_screen_height = (float) geo->screen_height;
-    int lower_limit = (int) (MIN_VCENTER*f_screen_height);
-    int upper_limit = (int) (MAX_VCENTER*f_screen_height);
-
-    // Convert percent to int
-    if (config.vcenter[0] != '\0')
-        convert_percent_to_int(config.vcenter, &vcenter, geo->screen_height);
-    if (vcenter == INVALID_PERCENT_VALUE)
-        convert_percent_to_int(DEFAULT_VCENTER, &vcenter, geo->screen_height);
-
-    // Check limits, calculate margin
-    if (vcenter < lower_limit)
-        vcenter = lower_limit;
-    else if (vcenter > upper_limit)
-        vcenter = upper_limit;
-    geo->y_margin = vcenter - button_height / 2;
+    geo->y_margin = classic_row_margin(geo, configured_classic_row_position());
 
     // Max highlight outline
     int max_highlight_outline_size = (config.highlight_hpadding < config.highlight_vpadding) 

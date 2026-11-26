@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include "appearance.h"
 
 // Color masking bit logic
 #if SDL_BYTEORDER == SDL_BIG_ENDIAN
@@ -29,8 +30,6 @@
 #define MAX_SCROLL_INDICATOR_OUTLINE 0.01F
 #define SCREEN_MARGIN 0.05F
 #define MAX_CLOCK_MARGIN 0.1F
-#define MIN_VCENTER 0.25F
-#define MAX_VCENTER 0.75F
 #define MIN_SLIDESHOW_IMAGE_DURATION 5000
 #define MAX_SLIDESHOW_IMAGE_DURATION 3600000
 #define MAX_SLIDESHOW_TRANSITION_TIME 3000
@@ -301,6 +300,7 @@ typedef struct {
     int highlight_vpadding;
     int highlight_hpadding;
     char vcenter[PERCENT_MAX_CHARS];
+    AppearanceSettings appearance;
     bool tv_layout;
     bool navigation_pop;
     bool navigation_sound;

@@ -45,6 +45,8 @@ void add_hotkey(const char *keycode, const char *cmd);
 void random_array(int *array, int array_size);
 void clean_path(char *path);
 void validate_settings(Geometry *geo);
+float configured_classic_row_position(void);
+int classic_row_margin(const Geometry *geometry, float percentage);
 void parse_config_file(const char *config_file_path);
 void read_file(const char *path, char **buffer);
 void sprintf_alloc(char **buffer, const char *format, ...);

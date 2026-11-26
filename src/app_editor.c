@@ -6,6 +6,7 @@
 #include <SDL_ttf.h>
 #include "launcher.h"
 #include "app_editor.h"
+#include "appearance_ui.h"
 #include "image.h"
 #include "photo_files.h"
 #include "platform/platform.h"
@@ -23,13 +24,14 @@ extern SDL_Window *window;
 extern Geometry geo;
 extern void request_launcher_redraw(void);
 extern bool apply_menu_settings(const Entry *entries, char *error, size_t size);
+extern bool open_launcher_appearance(TTF_Font *heading, TTF_Font *body, TTF_Font *small);
 
 typedef enum {
     VIEW_CLOSED, VIEW_LIST, VIEW_EDIT, VIEW_LIBRARY, VIEW_TEXT, VIEW_CONFIRM
 } EditorView;
 
 typedef enum {
-    ITEM_ADD, ITEM_ADD_ASSISTANT, ITEM_EDIT, ITEM_UP, ITEM_DOWN, ITEM_REMOVE, ITEM_SAVE, ITEM_BACK,
+    ITEM_ADD, ITEM_ADD_ASSISTANT, ITEM_APPEARANCE, ITEM_EDIT, ITEM_UP, ITEM_DOWN, ITEM_REMOVE, ITEM_SAVE, ITEM_BACK,
     ITEM_NAME, ITEM_COMMAND, ITEM_PROGRAM, ITEM_WEBSITE, ITEM_IMPORT, ITEM_LIBRARY,
     ITEM_DONE, ITEM_CANCEL, ITEM_CONFIRM, ITEM_PREVIOUS, ITEM_NEXT,
     ITEM_ROW, ITEM_TOTAL = ITEM_ROW + EDITOR_PAGE_SIZE
@@ -47,7 +49,7 @@ typedef struct {
 } EditorItem;
 
 static const char *const item_names[] = {
-    "Add application", "Add Home Assistant", "Edit", "Move up", "Move down", "Remove", "Save and return", "Back",
+    "Add application", "Add Home Assistant", "Icon row", "Edit", "Move up", "Move down", "Remove", "Save and return", "Back",
     "Name", "Launch command", "Choose program", "Website URL", "Import icon", "Icon library",
     "Done", "Cancel", "Remove card", "Previous page", "Next page"
 };
@@ -299,6 +301,7 @@ static void update_items(void)
         if (editor.view == VIEW_LIST) {
             add_item(ITEM_ADD, 252, 190, 350, 68);
             add_item(ITEM_ADD_ASSISTANT, 620, 190, 397, 68);
+            add_item(ITEM_APPEARANCE, 1250, 190, 418, 56);
             if (editor.selected != NULL) {
                 add_item(ITEM_EDIT, 1074, 596, 265, 70);
                 add_item(ITEM_REMOVE, 1350, 596, 318, 70);
@@ -1180,6 +1183,10 @@ static void activate(EditorAction action)
             if (start_edit(NULL, true))
                 start_input(ITEM_WEBSITE);
             break;
+        case ITEM_APPEARANCE:
+            if (!open_launcher_appearance(editor.heading_font, editor.body_font, editor.small_font))
+                set_notice("Could not open the icon row settings.", true);
+            break;
         case ITEM_EDIT: start_edit(editor.selected, false); break;
         case ITEM_UP: move_entry(true); break;
         case ITEM_DOWN: move_entry(false); break;
@@ -1235,6 +1242,14 @@ static void move_focus(int horizontal, int vertical)
         focus_action(ITEM_ADD);
         return;
     }
+    if (editor.focus == ITEM_ADD_ASSISTANT && horizontal > 0) {
+        focus_action(ITEM_APPEARANCE);
+        return;
+    }
+    if (editor.focus == ITEM_APPEARANCE && horizontal < 0) {
+        focus_action(ITEM_ADD_ASSISTANT);
+        return;
+    }
 
     SDL_Rect origin = {0};
     for (int i = 0; i < editor.item_count; i++) {
@@ -1247,8 +1262,9 @@ static void move_focus(int horizontal, int vertical)
     EditorAction next = editor.focus;
     for (int i = 0; i < editor.item_count; i++) {
         EditorItem *item = &editor.items[i];
-        // Rows use Right to reach their actions. The template is in the Add row above.
-        if (horizontal != 0 && editor.focus >= ITEM_ROW && item->action == ITEM_ADD_ASSISTANT)
+        // Rows use Right to reach their card actions, below the toolbar.
+        if (horizontal != 0 && editor.focus >= ITEM_ROW &&
+            (item->action == ITEM_ADD_ASSISTANT || item->action == ITEM_APPEARANCE))
             continue;
         int dx = item->rect.x + item->rect.w / 2 - (origin.x + origin.w / 2);
         int dy = item->rect.y + item->rect.h / 2 - (origin.y + origin.h / 2);
@@ -1267,6 +1283,10 @@ static void move_focus(int horizontal, int vertical)
 
 void app_editor_command(const char *command)
 {
+    if (appearance_ui_is_open()) {
+        appearance_ui_command(command);
+        return;
+    }
     if (!app_editor_is_open() || editor.saving || editor.importing || command == NULL)
         return;
     if (strcmp(command, SCMD_BACK) == 0 || strcmp(command, SCMD_HOME) == 0 ||
@@ -1289,6 +1309,10 @@ void app_editor_command(const char *command)
 
 void app_editor_mouse(int x, int y, bool click)
 {
+    if (appearance_ui_is_open()) {
+        appearance_ui_mouse(x, y, click);
+        return;
+    }
     if (!app_editor_is_open() || editor.saving || editor.importing)
         return;
     SDL_Point point = {x, y};
@@ -1348,6 +1372,10 @@ static void draw_input(SDL_Renderer *renderer)
 
 void app_editor_draw(SDL_Renderer *renderer)
 {
+    if (appearance_ui_is_open()) {
+        appearance_ui_draw(renderer);
+        return;
+    }
     if (!app_editor_is_open())
         return;
 
@@ -1398,6 +1426,7 @@ void app_editor_draw(SDL_Renderer *renderer)
 
 void app_editor_quit(void)
 {
+    appearance_ui_quit();
     close_editor();
     if (job.thread != NULL) {
         SDL_AtomicSet(&job.stop_requested, 1);

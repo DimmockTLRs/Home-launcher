@@ -48,10 +48,17 @@ static const SDL_Color light = { 239, 245, 255, 255 };
 static const SDL_Color muted = { 162, 180, 205, 255 };
 static const SDL_Color accent = { 193, 218, 255, 255 };
 static const SDL_Color caution = { 255, 208, 143, 255 };
+static const SDL_Color screen = { 11, 17, 29, 255 };
+
+#define SETTINGS_ENTER_MS 140u
+#define SAMPLE_WIDTH 160
+#define SAMPLE_HEIGHT 90
 
 static struct {
     bool open;
     bool saving;
+    bool entering;
+    Uint32 entered_at;
     int cursor_before;
     int selected;
     double scale;
@@ -77,8 +84,10 @@ static struct {
     SettingsText apps;
     SettingsText help;
     SettingsText notice;
+    SettingsText preview;
     SDL_Texture *row;
     SDL_Texture *focus_row;
+    SDL_Texture *sample_photo;
 } ui;
 
 static int scaled(int value)
@@ -133,6 +142,16 @@ static SDL_Texture *row_skin(int width, int height, bool focused)
         SDL_max(1, height - margin * 2), SDL_max(1, scaled(16)),
         focused ? "#2A4160" : "#182438", border);
     return rasterize_svg(svg, -1, -1, NULL);
+}
+
+static SDL_Texture *create_sample_photo(void)
+{
+    char svg[] = "<svg viewBox='0 0 160 90'>"
+        "<rect width='160' height='90' fill='#6285A6'/>"
+        "<circle cx='111' cy='28' r='12' fill='#F2D9A1'/>"
+        "<path d='M0 70 L44 34 L71 62 L98 42 L160 74 V90 H0 Z' fill='#334E6A'/>"
+        "<path d='M0 80 L34 63 L74 80 L119 62 L160 79 V90 H0 Z' fill='#21384E'/></svg>";
+    return rasterize_svg(svg, SAMPLE_WIDTH, SAMPLE_HEIGHT, NULL);
 }
 
 static TTF_Font *settings_font(const char *path, int size)
@@ -263,7 +282,8 @@ bool settings_open(void)
     set_text(&ui.save, ui.body_font, "Save and return", light);
     set_text(&ui.back, ui.body_font, "Back", light);
     set_text(&ui.manage, ui.body_font, "Manage photos", light);
-    set_text(&ui.apps, ui.body_font, "Applications and icons", light);
+    set_text(&ui.apps, ui.body_font, "Applications and Icons", light);
+    set_text(&ui.preview, ui.small_font, "Mode preview", muted);
     set_text(&ui.help, ui.small_font, "Arrows  Navigate or adjust     Enter / A  Select     Esc / B  Back", muted);
     for (int i = 0; i < ROW_SAVE; i++) {
         set_text(&ui.labels[i], ui.body_font, labels[i], light);
@@ -273,8 +293,11 @@ bool settings_open(void)
         ui.row = row_skin(ui.rows[0].w, ui.rows[0].h, false);
         ui.focus_row = row_skin(ui.rows[0].w, ui.rows[0].h, true);
     }
+    ui.sample_photo = create_sample_photo();
     refresh_notice();
     ui.open = true;
+    ui.entering = true;
+    ui.entered_at = SDL_GetTicks();
     ui.cursor_before = SDL_ShowCursor(SDL_QUERY);
     SDL_ShowCursor(SDL_ENABLE);
     request_launcher_redraw();
@@ -492,6 +515,11 @@ void settings_pump(void)
 {
     pump_photo_gallery();
     app_editor_pump();
+    if (ui.entering) {
+        ui.entering = SDL_GetTicks() - ui.entered_at < SETTINGS_ENTER_MS;
+        if (!app_editor_is_open() && !photo_gallery_is_open())
+            request_launcher_redraw();
+    }
 }
 
 static void fill(SDL_Renderer *renderer, const SDL_Rect *rect, SDL_Color color)
@@ -500,11 +528,111 @@ static void fill(SDL_Renderer *renderer, const SDL_Rect *rect, SDL_Color color)
     SDL_RenderFillRect(renderer, rect);
 }
 
+static void fill_at(SDL_Renderer *renderer, int x, int y, int w, int h, SDL_Color color)
+{
+    SDL_Rect rect = bounds(x, y, w, h);
+    fill(renderer, &rect, color);
+}
+
+static void draw_sample_photo(SDL_Renderer *renderer, int x, int y, int w, int h, int photo)
+{
+    static const SDL_Color tints[] = {
+        { 255, 255, 255, 255 }, { 186, 248, 222, 255 },
+        { 238, 185, 223, 255 }, { 255, 227, 181, 255 }
+    };
+    if (ui.sample_photo == NULL) {
+        fill_at(renderer, x, y, w, h, (SDL_Color){ 75, 108, 146, 255 });
+        return;
+    }
+    SDL_Rect source = {0, 0, SAMPLE_WIDTH, SAMPLE_HEIGHT};
+    if (w * SAMPLE_HEIGHT > h * SAMPLE_WIDTH) {
+        source.h = SAMPLE_WIDTH * h / w;
+        source.y = (SAMPLE_HEIGHT - source.h) / 2;
+    } else {
+        source.w = SAMPLE_HEIGHT * w / h;
+        source.x = (SAMPLE_WIDTH - source.w) / 2;
+    }
+    SDL_Rect target = bounds(x, y, w, h);
+    SDL_Color tint = tints[photo];
+    SDL_SetTextureColorMod(ui.sample_photo, tint.r, tint.g, tint.b);
+    SDL_RenderCopyEx(renderer, ui.sample_photo, &source, &target, 0, NULL,
+        photo % 2 == 0 ? SDL_FLIP_NONE : SDL_FLIP_HORIZONTAL);
+}
+
+static void draw_mode_preview(SDL_Renderer *renderer)
+{
+    enum { x = 950, y = 275, w = 128, h = 72, gap = 3 };
+    const SDL_Color frame = { 98, 135, 174, 255 };
+    draw_text(renderer, &ui.preview, bounds(751, 262, 181, 96), false);
+    if (ui.draft.mode == BACKGROUND_SLIDESHOW) {
+        fill_at(renderer, x + 18, y - 6, w, h, (SDL_Color){ 52, 74, 100, 255 });
+        draw_sample_photo(renderer, x + 20, y - 4, w - 4, h - 4, 1);
+    }
+    fill_at(renderer, x - 2, y - 2, w + 4, h + 4, frame);
+
+    switch (ui.draft.mode) {
+        case BACKGROUND_COLOR: {
+            SDL_Color color = config.background_color;
+            color.a = 255;
+            fill_at(renderer, x, y, w, h, color);
+            break;
+        }
+        case BACKGROUND_IMAGE:
+        case BACKGROUND_SLIDESHOW:
+            draw_sample_photo(renderer, x, y, w, h, 0);
+            break;
+        case BACKGROUND_COLLAGE: {
+            int left = ui.draft.layout == COLLAGE_FEATURE || ui.draft.layout == COLLAGE_AUTO ?
+                (w - gap) * 3 / 5 : (w - gap) / 2;
+            int top = (h - gap) / 2;
+            int right = w - left - gap;
+            fill_at(renderer, x, y, w, h, screen);
+            if (ui.draft.layout == COLLAGE_GRID) {
+                draw_sample_photo(renderer, x, y, left, top, 0);
+                draw_sample_photo(renderer, x, y + top + gap, left, h - top - gap, 3);
+            } else
+                draw_sample_photo(renderer, x, y, left, h, 0);
+            if (ui.draft.layout == COLLAGE_SPLIT)
+                draw_sample_photo(renderer, x + left + gap, y, right, h, 1);
+            else {
+                draw_sample_photo(renderer, x + left + gap, y, right, top, 1);
+                draw_sample_photo(renderer, x + left + gap, y + top + gap, right, h - top - gap, 2);
+            }
+            break;
+        }
+        case BACKGROUND_TRANSPARENT:
+            for (int j = 0; j < 3; j++) {
+                for (int i = 0; i < 5; i++) {
+                    int left = x + i * w / 5;
+                    SDL_Color square = (i + j) % 2 == 0 ?
+                        (SDL_Color){ 32, 48, 68, 255 } : (SDL_Color){ 62, 83, 107, 255 };
+                    fill_at(renderer, left, y + j * h / 3, x + (i + 1) * w / 5 - left, h / 3, square);
+                }
+            }
+            break;
+    }
+}
+
+static void draw_entrance(SDL_Renderer *renderer)
+{
+    Uint32 elapsed = SDL_GetTicks() - ui.entered_at;
+    if (!ui.entering || elapsed >= SETTINGS_ENTER_MS)
+        return;
+
+    SDL_BlendMode blend;
+    SDL_GetRenderDrawBlendMode(renderer, &blend);
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_Color shade = screen;
+    shade.a = (Uint8)((SETTINGS_ENTER_MS - elapsed) * 86 / SETTINGS_ENTER_MS);
+    fill(renderer, NULL, shade);
+    SDL_SetRenderDrawBlendMode(renderer, blend);
+}
+
 static void draw_action(SDL_Renderer *renderer, int index, const SettingsText *text)
 {
     SDL_Rect rect = ui.rows[index];
     fill(renderer, &rect, index == ROW_SAVE ? (SDL_Color){ 43, 70, 105, 255 } :
-        (SDL_Color){ 25, 38, 57, 255 });
+        ui.selected == index ? (SDL_Color){ 42, 65, 96, 255 } : (SDL_Color){ 25, 38, 57, 255 });
     if (ui.selected == index) {
         SDL_SetRenderDrawColor(renderer, accent.r, accent.g, accent.b, accent.a);
         for (int i = 0; i < SDL_max(1, scaled(3)); i++) {
@@ -531,10 +659,11 @@ void settings_draw(SDL_Renderer *renderer)
 
     SDL_Color previous;
     SDL_GetRenderDrawColor(renderer, &previous.r, &previous.g, &previous.b, &previous.a);
-    fill(renderer, NULL, (SDL_Color){ 11, 17, 29, 255 });
+    fill(renderer, NULL, screen);
 
     SDL_Rect panel = bounds(220, 233, 1480, 698);
     fill(renderer, &panel, (SDL_Color){ 14, 23, 38, 255 });
+    fill_at(renderer, 252, 232, 1416, 2, (SDL_Color){ 36, 55, 80, 255 });
     draw_text(renderer, &ui.section, bounds(252, 88, 950, 42), false);
     draw_text(renderer, &ui.title, bounds(252, 122, 1100, 92), false);
     draw_action(renderer, ROW_APPS, &ui.apps);
@@ -548,16 +677,18 @@ void settings_draw(SDL_Renderer *renderer)
             fill(renderer, &rect, ui.selected == i ? (SDL_Color){ 42, 65, 96, 255 } :
                 (SDL_Color){ 24, 36, 56, 255 });
         int y = 262 + 112 * i;
-        draw_text(renderer, &ui.labels[i], bounds(292, y, 815, 96), false);
+        draw_text(renderer, &ui.labels[i], bounds(292, y, 432, 96), false);
         draw_text(renderer, &ui.values[i], bounds(1212, y, 364, 96), true);
         draw_text(renderer, &ui.left, bounds(1140, y, 72, 96), true);
         draw_text(renderer, &ui.right, bounds(1576, y, 72, 96), true);
     }
+    draw_mode_preview(renderer);
     draw_text(renderer, &ui.notice, bounds(252, 721, 1416, 94), false);
     draw_action(renderer, ROW_BACK, &ui.back);
     draw_action(renderer, ROW_MANAGE, &ui.manage);
     draw_action(renderer, ROW_SAVE, &ui.save);
     draw_text(renderer, &ui.help, bounds(252, 954, 1416, 60), false);
+    draw_entrance(renderer);
     SDL_SetRenderDrawColor(renderer, previous.r, previous.g, previous.b, previous.a);
 }
 
@@ -585,8 +716,10 @@ void settings_quit(void)
     SDL_DestroyTexture(ui.apps.texture);
     SDL_DestroyTexture(ui.help.texture);
     SDL_DestroyTexture(ui.notice.texture);
+    SDL_DestroyTexture(ui.preview.texture);
     SDL_DestroyTexture(ui.row);
     SDL_DestroyTexture(ui.focus_row);
+    SDL_DestroyTexture(ui.sample_photo);
 
     if (ui.body_font != title_info.font)
         TTF_CloseFont(ui.body_font);

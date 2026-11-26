@@ -1,8 +1,14 @@
 #ifndef FLEX_LAUNCHER_TV_UI_H
 #define FLEX_LAUNCHER_TV_UI_H
 
-// Uses the launcher menu and geometry types.
+#include "appearance.h"
+
+// Uses the launcher menu and geometry types. Sizing follows the full page,
+// while the returned rectangle centers the entries on the visible page.
+SDL_Rect measure_tv_row(const Geometry *geometry, unsigned int page_capacity,
+    unsigned int visible_count, const AppearanceSettings *appearance, int *card_width, int *gap);
 void size_tv_row(Geometry *geometry);
+bool apply_tv_appearance(void);
 bool init_tv_ui(void);
 void layout_tv_entries(Entry *entry, int count);
 void reset_tv_motion(void);

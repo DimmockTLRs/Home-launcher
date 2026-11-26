@@ -44,7 +44,7 @@ A line can be commented out by using the # character at the beginning of the lin
 
 Open the gear card at the end of the home menu to edit settings. You can also press F1 on the home menu if you have no F1 hotkey. Use Up and Down to move, Left and Right to adjust, and Enter or your controller's Select button to choose an action. You can also click the controls. Back or Escape discards unsaved changes.
 
-The Backgrounds screen can switch among Solid colour, Single image, Slideshow and Collage. It also controls the collage layout, photo duration and fade duration.
+The Backgrounds screen can switch among Solid colour, Single image, Slideshow and Collage. It also controls the collage layout, photo duration and fade duration. A diagram previews the selected mode and collage layout.
 
 Open **Manage photos** to browse thumbnails for the current photo folder. On Windows, **Choose folder** opens a native folder picker. **Add photos** lets you select one or more JPEG, PNG or WebP files. Imports copy the originals into the displayed folder. A filename conflict gets a new name, and the original file is kept intact.
 
@@ -61,6 +61,12 @@ From Settings, open **Applications and Icons** to edit the cards on Home. **Add 
 **Import icon** on Windows copies a JPEG, PNG or WebP file into your user data folder. Imported icons stay available in **Icon library** for any card. The preview shows the icon fitted to a TV card, and removing a card leaves its program and icon files on disk.
 
 Choose **Done** to stage each edit. Select a card and use **Move up**, **Move down**, or **Remove** to change the Home list. **Save and return** applies the updated cards and order immediately and preserves other menus and settings in the INI. Use a keyboard or paste when entering names, commands or addresses.
+
+### Icon row
+
+Open **Settings → Applications and Icons → Icon row**. Adjust **Row position** to move the icons higher or lower on the screen. In TV style, choose **Auto** to place the row near the bottom or set a position as a percentage from the top. Use **Card size** to resize TV cards and **Card opacity** to adjust the fill behind unfocused cards.
+
+The preview updates as you adjust the controls. Choose **Save and return** to apply your changes immediately and keep them after restarting. **Back** discards the draft.
 
 ### Home Assistant
 
@@ -249,6 +255,9 @@ The settings in this section define the geometric layout of the launcher.
 - [IconSpacing](#iconspacing)
 - [Style](#style)
 - [VCenter](#vcenter)
+- [TVRowPosition](#tvrowposition)
+- [TVCardScale](#tvcardscale)
+- [TVCardOpacity](#tvcardopacity)
 - [NavigationPop and NavigationSound](#navigationpop-and-navigationsound)
 
 ##### MaxButtons
@@ -268,12 +277,30 @@ Default: 5%
 
 ##### Style
 
-Set `Style=TV` in `[Layout]` for a lower row of TV-sized cards, aspect-preserving logos, a dark gradient over the background, and animated focus. It uses existing entries, titles, navigation mappings, and `MaxButtons`. The card row sets its own spacing and bottom margin. `IconSize` limits logo size inside the cards, and `[Highlight] Enabled` controls the focus border. The default `Style=Classic` uses the original layout settings, including `VCenter`.
+Set `Style=TV` in `[Layout]` for TV-sized cards, aspect-preserving logos, a dark gradient over the background, and animated focus. It uses existing entries, titles, navigation mappings, and `MaxButtons`. `IconSize` limits logo size inside the cards, and `[Highlight] Enabled` controls the focus border. The default `Style=Classic` uses the original layout settings, including `VCenter`.
 
 ##### VCenter
-Defines the vertical centering of the menu entries in percent of the screen height. A value of 50% will cause the buttons to be centered halfway in the screen. Increasing the value will lower the buttons, and lowering it will raise them.
+Sets the vertical center of the Classic icon row as a percentage of screen height. The effective range is 25% to 75%. Larger values move the row lower.
 
 Default: 50%
+
+##### TVRowPosition
+
+Sets the vertical center of the TV card row as a percentage of screen height. Choose 0% to 100% or use `Auto` to place the row near the bottom. The launcher keeps the row within the visible area.
+
+Default: `Auto`
+
+##### TVCardScale
+
+Sets the TV card size to 70% to 120% of its default size. The available space may limit enlargement when a page contains several cards.
+
+Default: 100%
+
+##### TVCardOpacity
+
+Sets the fill opacity of unfocused TV cards from 0% to 100%. The focused card uses a high-contrast fill.
+
+Default: 83%
 
 ##### NavigationPop and NavigationSound
 

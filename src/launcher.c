@@ -13,6 +13,7 @@
 #include "image.h"
 #include "background.h"
 #include "app_editor.h"
+#include "appearance_ui.h"
 #include "config_save.h"
 #include "photo_files.h"
 #include "photo_gallery.h"
@@ -112,6 +113,7 @@ Config config = {
     .highlight_fill_opacity[0]        = '\0',
     .highlight_outline_opacity[0]     = '\0',
     .vcenter[0]             = '\0',
+    .appearance                       = { ROW_POSITION_AUTO, TV_CARD_SCALE_DEFAULT, TV_CARD_OPACITY_DEFAULT },
     .icon_spacing_str[0]              = '\0',
     .scroll_indicators                = DEFAULT_SCROLL_INDICATORS,
     .scroll_indicator_fill_color.r    = DEFAULT_SCROLL_INDICATOR_FILL_COLOR_R,
@@ -197,6 +199,7 @@ static bool redraw_requested = true;
 
 static char *config_file_path;
 static Entry *settings_entry;
+static Entry *navigation_entry;
 static SDL_Rect settings_card_bounds;
 static bool settings_key_latched[SDL_NUM_SCANCODES];
 static struct {
@@ -218,6 +221,15 @@ static struct {
     bool saved;
     char error[256];
 } menu_save;
+
+static struct {
+    SDL_Thread *thread;
+    SDL_atomic_t ready;
+    AppearanceSettings before;
+    AppearanceSettings after;
+    bool saved;
+    char error[256];
+} appearance_save;
 
 void request_launcher_redraw(void)
 {
@@ -256,7 +268,7 @@ static void free_save_paths(void)
 
 bool apply_background_settings(const BackgroundSettings *settings, char *error, size_t error_size)
 {
-    if (settings_save.thread != NULL || menu_save.thread != NULL) {
+    if (settings_save.thread != NULL || menu_save.thread != NULL || appearance_save.thread != NULL) {
         SDL_strlcpy(error, "A save is already in progress.", error_size);
         return false;
     }
@@ -353,7 +365,7 @@ static void free_menu_save_entries(void)
 
 bool apply_menu_settings(const Entry *entries, char *error, size_t error_size)
 {
-    if (settings_save.thread != NULL || menu_save.thread != NULL) {
+    if (settings_save.thread != NULL || menu_save.thread != NULL || appearance_save.thread != NULL) {
         SDL_strlcpy(error, "A save is already in progress.", error_size);
         return false;
     }
@@ -372,6 +384,136 @@ bool apply_menu_settings(const Entry *entries, char *error, size_t error_size)
         return false;
     }
     return true;
+}
+
+static AppearanceSettings current_appearance_settings(void)
+{
+    AppearanceSettings current = config.appearance;
+    if (!config.tv_layout)
+        current.row_position = (int)(configured_classic_row_position() + 0.5f);
+    return current;
+}
+
+bool open_launcher_appearance(TTF_Font *heading, TTF_Font *body, TTF_Font *small)
+{
+    AppearanceSettings current = current_appearance_settings();
+    return appearance_ui_open(&current, config.tv_layout, heading, body, small);
+}
+
+static int save_appearance_worker(void *unused)
+{
+    (void)unused;
+    appearance_save.saved = save_appearance_config(config_file_path, config.tv_layout, &appearance_save.after,
+        &appearance_save.before, appearance_save.error, sizeof(appearance_save.error));
+    SDL_AtomicSet(&appearance_save.ready, 1);
+    return 0;
+}
+
+bool apply_appearance_settings(const AppearanceSettings *settings, char *error, size_t error_size)
+{
+    if (settings_save.thread != NULL || menu_save.thread != NULL || appearance_save.thread != NULL) {
+        SDL_strlcpy(error, "A save is already in progress.", error_size);
+        return false;
+    }
+    appearance_save.before = current_appearance_settings();
+    appearance_save.after = *settings;
+    appearance_save.error[0] = '\0';
+    SDL_AtomicSet(&appearance_save.ready, 0);
+    appearance_save.thread = SDL_CreateThread(save_appearance_worker, "Save icon row settings", NULL);
+    if (appearance_save.thread == NULL) {
+        SDL_strlcpy(error, "Could not start the icon row save.", error_size);
+        return false;
+    }
+    return true;
+}
+
+static void finish_appearance_save(void)
+{
+    if (appearance_save.thread == NULL || !SDL_AtomicGet(&appearance_save.ready))
+        return;
+    SDL_WaitThread(appearance_save.thread, NULL);
+    appearance_save.thread = NULL;
+    if (appearance_save.saved) {
+        if (config.tv_layout) {
+            config.appearance = appearance_save.after;
+            if (!apply_tv_appearance())
+                log_error("Could not update the TV card textures. The saved appearance will load next time.");
+        }
+        else {
+            SDL_snprintf(config.vcenter, sizeof(config.vcenter), "%d%%", appearance_save.after.row_position);
+            geo.y_margin = classic_row_margin(&geo, configured_classic_row_position());
+        }
+        calculate_button_geometry(current_menu->root_entry, geo.num_buttons);
+        if (!config.tv_layout && config.highlight) {
+            highlight->rect.x = current_entry->icon_rect.x - config.highlight_hpadding;
+            highlight->rect.y = current_entry->icon_rect.y - config.highlight_vpadding;
+        }
+        navigation_entry = NULL;
+        reset_tv_motion();
+        log_debug("Icon row settings saved to %s", config_file_path);
+    }
+    appearance_ui_save_completed(appearance_save.saved, appearance_save.error);
+    request_launcher_redraw();
+}
+
+void draw_appearance_preview(SDL_Renderer *target, SDL_Rect viewport, const AppearanceSettings *appearance)
+{
+    int count = (int)SDL_min(default_menu->num_entries, config.max_buttons);
+    if (count <= 0 || viewport.w <= 0 || viewport.h <= 0)
+        return;
+
+    int card_width = config.icon_size;
+    int gap = config.icon_spacing;
+    SDL_Rect row;
+    if (config.tv_layout)
+        row = measure_tv_row(&geo, config.max_buttons, (unsigned int)count, appearance, &card_width, &gap);
+    else {
+        int width = count * card_width + (count - 1) * gap;
+        row = (SDL_Rect){(geo.screen_width - width) / 2, classic_row_margin(&geo, (float)appearance->row_position),
+            width, config.icon_size};
+    }
+
+    SDL_Color previous;
+    SDL_BlendMode blend;
+    SDL_Rect previous_clip;
+    bool clipped = SDL_RenderIsClipEnabled(target);
+    SDL_RenderGetClipRect(target, &previous_clip);
+    SDL_GetRenderDrawColor(target, &previous.r, &previous.g, &previous.b, &previous.a);
+    SDL_GetRenderDrawBlendMode(target, &blend);
+    SDL_RenderSetClipRect(target, &viewport);
+    SDL_SetRenderDrawBlendMode(target, SDL_BLENDMODE_BLEND);
+    const Entry *entry = default_menu->first_entry;
+    for (int i = 0; i < count; i++, entry = entry->next) {
+        SDL_Rect box = {
+            viewport.x + (row.x + i * (card_width + gap)) * viewport.w / geo.screen_width,
+            viewport.y + row.y * viewport.h / geo.screen_height,
+            SDL_max(1, card_width * viewport.w / geo.screen_width),
+            SDL_max(1, row.h * viewport.h / geo.screen_height)
+        };
+        SDL_Rect icon = box;
+        if (config.tv_layout) {
+            bool focused = i == 0 && config.highlight;
+            if (focused)
+                SDL_SetRenderDrawColor(target, 48, 70, 100, 250);
+            else
+                SDL_SetRenderDrawColor(target, 17, 25, 38, (Uint8)(appearance->card_opacity * 255 / 100));
+            SDL_RenderFillRect(target, &box);
+            if (focused) {
+                SDL_SetRenderDrawColor(target, 193, 218, 255, 255);
+                SDL_RenderDrawRect(target, &box);
+            }
+            int pad = box.h / 6;
+            icon = (SDL_Rect){box.x + pad, box.y + pad, SDL_max(1, box.w - 2 * pad),
+                SDL_max(1, box.h - 2 * pad)};
+        }
+        if (entry->icon != NULL) {
+            icon = fit_tv_texture(entry->icon, icon);
+            SDL_RenderCopy(target, entry->icon, NULL, &icon);
+        }
+    }
+    SDL_RenderSetClipRect(target, clipped ? &previous_clip : NULL);
+    SDL_SetRenderDrawBlendMode(target, blend);
+    SDL_SetRenderDrawColor(target, previous.r, previous.g, previous.b, previous.a);
 }
 
 bool open_launcher_app_editor(TTF_Font *heading, TTF_Font *body, TTF_Font *small)
@@ -447,7 +589,6 @@ static SDL_Texture *settings_gear_icon(void)
 #define NAVIGATION_AUDIO_RATE 48000
 #define NAVIGATION_AUDIO_SAMPLES (NAVIGATION_AUDIO_RATE * 65 / 1000)
 
-static Entry *navigation_entry;
 static Uint32 navigation_started;
 static SDL_AudioDeviceID navigation_device;
 static float navigation_tone[NAVIGATION_AUDIO_SAMPLES];
@@ -658,6 +799,8 @@ static void cleanup()
     if (menu_save.thread != NULL)
         SDL_WaitThread(menu_save.thread, NULL);
     free_menu_save_entries();
+    if (appearance_save.thread != NULL)
+        SDL_WaitThread(appearance_save.thread, NULL);
     quit_photo_gallery();
     settings_quit();
     quit_background();
@@ -1842,6 +1985,7 @@ int main(int argc, char *argv[])
 
         finish_settings_save();
         finish_menu_save();
+        finish_appearance_save();
         settings_pump();
 
         // Post-event loop updates
