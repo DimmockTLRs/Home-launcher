@@ -9,6 +9,7 @@ set(SOURCES
   app_editor.c
   app_editor.h
   website.c
+  website.h
   settings_ui.c
   settings_ui.h
   photo_gallery.c

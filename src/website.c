@@ -4,6 +4,7 @@
 #include <SDL.h>
 #include "launcher.h"
 #include "platform/platform.h"
+#include "website.h"
 
 static bool decimal(char c)
 {
@@ -161,4 +162,22 @@ bool valid_website_url(const char *url)
             return false;
     }
     return true;
+}
+
+const char *home_assistant_address(const char *command)
+{
+    const size_t length = sizeof(SCMD_HOME_ASSISTANT) - 1;
+    if (command == NULL || strncmp(command, SCMD_HOME_ASSISTANT, length) != 0)
+        return NULL;
+    const char *address = command + length;
+    if (*address != '\0' && *address != ' ' && *address != '\t')
+        return NULL;
+    return address + strspn(address, " \t");
+}
+
+bool valid_home_assistant_url(const char *url)
+{
+    // User information is rejected by the website validator. Queries and
+    // fragments are unnecessary for dashboard routes and can carry secrets.
+    return valid_website_url(url) && strpbrk(url, "?#") == NULL;
 }

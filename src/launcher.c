@@ -19,6 +19,7 @@
 #include "settings_ui.h"
 #include "tv_ui.h"
 #include "weather.h"
+#include "website.h"
 #include "util.h"
 #include "debug.h"
 #include "clock.h"
@@ -738,7 +739,7 @@ static void cleanup()
 // A function to handle key presses from keyboard
 static void handle_keypress(SDL_Keysym *key)
 {
-    if (config.debug)
+    if (config.debug && !settings_is_typing())
         log_debug("Key %s (#%X) detected", SDL_GetKeyName(key->sym), key->sym);
 
     if (settings_is_open()) {
@@ -773,7 +774,7 @@ static void handle_keypress(SDL_Keysym *key)
             "Command: %s", 
             current_entry->title, 
             current_entry->icon_path, 
-            current_entry->cmd
+            home_assistant_address(current_entry->cmd) != NULL ? SCMD_HOME_ASSISTANT : current_entry->cmd
         );
         
         execute_command(current_entry->cmd);
@@ -938,6 +939,8 @@ static void render_buttons(Menu *menu)
         }
         else if (strcmp(entry->icon_path, APP_ICON_DEFAULT) == 0)
             entry->icon = default_app_icon();
+        else if (strcmp(entry->icon_path, APP_ICON_HOME_ASSISTANT) == 0)
+            entry->icon = home_assistant_icon();
         else {
             entry->icon = load_texture_from_file(entry->icon_path);
             entry->icon_selected_path = selected_path(entry->icon_path);
@@ -1163,9 +1166,47 @@ static void wait_for_launched_application(void)
         quit(EXIT_SUCCESS);
 }
 
+static void open_launcher_settings(int assistant_index)
+{
+    if (current_menu != default_menu || state.application_launching || state.application_running)
+        return;
+    bool opened = assistant_index < 0 ? settings_open() : settings_open_home_assistant(assistant_index);
+    if (opened) {
+        navigation_entry = NULL;
+        reset_tv_motion();
+        request_launcher_redraw();
+        log_debug("Opened launcher settings");
+    }
+}
+
+static void select_home_assistant(const char *command, const char *address)
+{
+    if (valid_home_assistant_url(address)) {
+        if (open_website(address))
+            wait_for_launched_application();
+        return;
+    }
+
+    if (current_menu != default_menu || current_entry == NULL || current_entry->cmd != command)
+        return;
+    int index = 0;
+    for (const Entry *entry = default_menu->first_entry; entry != NULL; entry = entry->next, index++) {
+        if (entry == current_entry) {
+            open_launcher_settings(index);
+            return;
+        }
+    }
+}
+
 // A function to execute the user's command
 static void execute_command(const char *command)
 {
+    const char *assistant_address = home_assistant_address(command);
+    if (assistant_address != NULL) {
+        select_home_assistant(command, assistant_address);
+        return;
+    }
+
     // Copy command into separate buffer
     char *cmd = strdup(command);
 
@@ -1198,15 +1239,8 @@ static void execute_command(const char *command)
             move_right();
         else if (!strcmp(special_command, SCMD_SELECT))
             execute_command(current_entry->cmd);
-        else if (!strcmp(special_command, SCMD_SETTINGS)) {
-            if (current_menu == default_menu && !state.application_launching && !state.application_running &&
-                settings_open()) {
-                navigation_entry = NULL;
-                reset_tv_motion();
-                request_launcher_redraw();
-                log_debug("Opened launcher settings");
-            }
-        }
+        else if (!strcmp(special_command, SCMD_SETTINGS))
+            open_launcher_settings(-1);
         else if (!strcmp(special_command, SCMD_HOME))
             load_menu(default_menu, false, true);
         else if (!strcmp(special_command, SCMD_BACK))

@@ -68,6 +68,20 @@ SDL_Texture *default_app_icon(void)
     return rasterize_svg(icon, -1, -1, NULL);
 }
 
+SDL_Texture *home_assistant_icon(void)
+{
+    char icon[] = "<svg viewBox='0 0 96 96'>"
+        "<rect x='5' y='5' width='86' height='86' rx='20' fill='#152D48' "
+        "stroke='#487EAC' stroke-width='2'/>"
+        "<path d='M20 44 L48 21 L76 44 M26 47 V72 H70 V47' fill='none' "
+        "stroke='#D1E9FF' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/>"
+        "<path d='M37 59 L48 48 L59 59' fill='none' stroke='#7ED7FF' stroke-width='3'/>"
+        "<circle cx='37' cy='59' r='4' fill='#7ED7FF'/>"
+        "<circle cx='48' cy='48' r='4' fill='#7ED7FF'/>"
+        "<circle cx='59' cy='59' r='4' fill='#7ED7FF'/></svg>";
+    return rasterize_svg(icon, -1, -1, NULL);
+}
+
 // A function to load a texture from a    SDL surface
 SDL_Texture *load_texture(SDL_Surface *surface)
 {

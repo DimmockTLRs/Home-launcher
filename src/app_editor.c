@@ -11,11 +11,13 @@
 #include "platform/platform.h"
 #include "tv_ui.h"
 #include "util.h"
+#include "website.h"
 
 #define EDITOR_PAGE_SIZE 6
 #define PREVIEW_EDGE 480
 #define TEXT_LIMIT 4096
 #define WEBSITE_PREFIX SCMD_WEBSITE " "
+#define DASHBOARD_URL "Dashboard URL"
 
 extern SDL_Window *window;
 extern Geometry geo;
@@ -27,7 +29,7 @@ typedef enum {
 } EditorView;
 
 typedef enum {
-    ITEM_ADD, ITEM_EDIT, ITEM_UP, ITEM_DOWN, ITEM_REMOVE, ITEM_SAVE, ITEM_BACK,
+    ITEM_ADD, ITEM_ADD_ASSISTANT, ITEM_EDIT, ITEM_UP, ITEM_DOWN, ITEM_REMOVE, ITEM_SAVE, ITEM_BACK,
     ITEM_NAME, ITEM_COMMAND, ITEM_PROGRAM, ITEM_WEBSITE, ITEM_IMPORT, ITEM_LIBRARY,
     ITEM_DONE, ITEM_CANCEL, ITEM_CONFIRM, ITEM_PREVIOUS, ITEM_NEXT,
     ITEM_ROW, ITEM_TOTAL = ITEM_ROW + EDITOR_PAGE_SIZE
@@ -45,7 +47,7 @@ typedef struct {
 } EditorItem;
 
 static const char *const item_names[] = {
-    "Add application", "Edit", "Move up", "Move down", "Remove", "Save and return", "Back",
+    "Add application", "Add Home Assistant", "Edit", "Move up", "Move down", "Remove", "Save and return", "Back",
     "Name", "Launch command", "Choose program", "Website URL", "Import icon", "Icon library",
     "Done", "Cancel", "Remove card", "Previous page", "Next page"
 };
@@ -101,6 +103,7 @@ static struct {
     EditorAction focus;
     SDL_Texture *labels[ITEM_ROW];
     SDL_Texture *titles[VIEW_CONFIRM + 1];
+    SDL_Texture *dashboard;
     SDL_Texture *rows[EDITOR_PAGE_SIZE];
     SDL_Texture *section;
     SDL_Texture *instructions;
@@ -253,8 +256,11 @@ static int content_count(void)
 static void add_item(EditorAction action, int x, int y, int w, int h)
 {
     bool row = action >= ITEM_ROW;
+    SDL_Texture *text = row ? editor.rows[action - ITEM_ROW] : editor.labels[action];
+    if (action == ITEM_WEBSITE && home_assistant_address(editor.command) != NULL)
+        text = editor.dashboard;
     editor.items[editor.item_count++] = (EditorItem){action, rect_for(x, y, w, h),
-        row ? editor.rows[action - ITEM_ROW] : editor.labels[action], row};
+        text, row};
 }
 
 static bool current_focus_visible(void)
@@ -292,6 +298,7 @@ static void update_items(void)
         label(&editor.page_label, editor.small_font, meta, muted);
         if (editor.view == VIEW_LIST) {
             add_item(ITEM_ADD, 252, 190, 350, 68);
+            add_item(ITEM_ADD_ASSISTANT, 620, 190, 397, 68);
             if (editor.selected != NULL) {
                 add_item(ITEM_EDIT, 1074, 596, 265, 70);
                 add_item(ITEM_REMOVE, 1350, 596, 318, 70);
@@ -309,8 +316,14 @@ static void update_items(void)
         add_item(ITEM_BACK, 252, 834, 194, 72);
     }
     else if (editor.view == VIEW_EDIT) {
-        for (int i = 0; i < EDITOR_PAGE_SIZE; i++)
-            add_item((EditorAction)(ITEM_NAME + i), 252, 249 + i * 87, 765, 73);
+        bool dashboard = home_assistant_address(editor.command) != NULL;
+        int row = 0;
+        for (int action = ITEM_NAME; action <= ITEM_LIBRARY; action++) {
+            if (dashboard && (action == ITEM_COMMAND || action == ITEM_PROGRAM))
+                continue;
+            add_item((EditorAction)action, 252, 249 + row * 87, 765, 73);
+            row++;
+        }
         add_item(ITEM_BACK, 252, 834, 194, 72);
         add_item(ITEM_DONE, 1319, 834, 349, 72);
     }
@@ -337,6 +350,14 @@ static const char *preview_path(void)
     return NULL;
 }
 
+static const char *command_caption(const char *command)
+{
+    const char *address = home_assistant_address(command);
+    if (address == NULL)
+        return command;
+    return valid_home_assistant_url(address) ? address : "Dashboard address required";
+}
+
 static void reset_preview(void)
 {
     SDL_DestroyTexture(editor.preview);
@@ -344,9 +365,12 @@ static void reset_preview(void)
     editor.preview_version++;
     const char *path = preview_path();
     bool builtin = path != NULL && strcmp(path, APP_ICON_DEFAULT) == 0;
-    editor.preview_pending = path != NULL && *path && !builtin;
+    bool assistant = path != NULL && strcmp(path, APP_ICON_HOME_ASSISTANT) == 0;
+    editor.preview_pending = path != NULL && *path && !builtin && !assistant;
     if (builtin)
         editor.preview = default_app_icon();
+    else if (assistant)
+        editor.preview = home_assistant_icon();
 
     char name[52] = {0}, command[70] = {0};
     if (editor.view == VIEW_LIBRARY && path != NULL)
@@ -354,18 +378,19 @@ static void reset_preview(void)
     else if (editor.view == VIEW_EDIT) {
         shorten(name, sizeof(name), *editor.name ? editor.name : "New application");
         if (*editor.command)
-            shorten(command, sizeof(command), editor.command);
+            shorten(command, sizeof(command), command_caption(editor.command));
     }
     else if (editor.view == VIEW_LIST && editor.selected != NULL) {
         shorten(name, sizeof(name), editor.selected->title);
-        shorten(command, sizeof(command), editor.selected->cmd);
+        shorten(command, sizeof(command), command_caption(editor.selected->cmd));
     }
     label(&editor.preview_name, editor.body_font, name, white);
     label(&editor.preview_command, editor.small_font, command, muted);
     if (editor.view == VIEW_EDIT) {
         char name_only[70];
-        shorten(name_only, sizeof(name_only), path == NULL || !strcmp(path, APP_ICON_DEFAULT) ?
-            "Default icon" : file_name(path));
+        const char *icon_name = assistant ? "Home Assistant icon" :
+            (path == NULL || builtin ? "Default icon" : file_name(path));
+        shorten(name_only, sizeof(name_only), icon_name);
         label(&editor.icon_binding, editor.small_font, name_only, muted);
     }
     request_launcher_redraw();
@@ -553,6 +578,7 @@ static void close_editor(void)
         SDL_DestroyTexture(editor.labels[i]);
     for (int i = 0; i <= VIEW_CONFIRM; i++)
         SDL_DestroyTexture(editor.titles[i]);
+    SDL_DestroyTexture(editor.dashboard);
     for (int i = 0; i < EDITOR_PAGE_SIZE; i++)
         SDL_DestroyTexture(editor.rows[i]);
     SDL_DestroyTexture(editor.section);
@@ -594,6 +620,7 @@ bool app_editor_open(const Entry *entries, const Entry *stop,
     editor.origin_y = (geo.screen_height - scaled(1080)) / 2;
     for (int i = 0; i < ITEM_ROW; i++)
         label(&editor.labels[i], body, item_names[i], white);
+    label(&editor.dashboard, body, DASHBOARD_URL, white);
     label(&editor.section, small, "Settings", muted);
     label(&editor.titles[VIEW_LIST], heading, "Applications and Icons", white);
     label(&editor.titles[VIEW_EDIT], heading, "Application details", white);
@@ -620,15 +647,18 @@ bool app_editor_is_typing(void)
     return editor.view == VIEW_TEXT;
 }
 
-static void start_edit(Entry *entry)
+static bool start_edit(Entry *entry, bool assistant_template)
 {
-    editor.name = strdup(entry != NULL ? entry->title : "");
-    editor.command = strdup(entry != NULL ? entry->cmd : "");
-    editor.icon = strdup(entry != NULL ? entry->icon_path : APP_ICON_DEFAULT);
+    const char *name = assistant_template ? "Home Assistant" : "";
+    const char *command = assistant_template ? SCMD_HOME_ASSISTANT : "";
+    const char *icon = assistant_template ? APP_ICON_HOME_ASSISTANT : APP_ICON_DEFAULT;
+    editor.name = strdup(entry != NULL ? entry->title : name);
+    editor.command = strdup(entry != NULL ? entry->cmd : command);
+    editor.icon = strdup(entry != NULL ? entry->icon_path : icon);
     if (editor.name == NULL || editor.command == NULL || editor.icon == NULL) {
         discard_form();
         set_notice("Could not open the application editor.", true);
-        return;
+        return false;
     }
     editor.editing = entry;
     editor.view = VIEW_EDIT;
@@ -636,6 +666,7 @@ static void start_edit(Entry *entry)
     set_notice("", false);
     update_items();
     reset_preview();
+    return true;
 }
 
 static void return_to_list(void)
@@ -677,6 +708,11 @@ static void finish_edit(void)
         contains_line_break(editor.icon) || strchr(editor.icon, ';') != NULL ||
         contains_line_break(editor.command) || strcmp(editor.command, SCMD_SELECT) == 0) {
         set_notice("This entry contains characters or a command the launcher cannot save.", true);
+        return;
+    }
+    const char *dashboard = home_assistant_address(editor.command);
+    if (dashboard != NULL && *dashboard != '\0' && !valid_home_assistant_url(dashboard)) {
+        set_notice("Enter a dashboard address without sign-in details, a query or a fragment.", true);
         return;
     }
     size_t website_prefix = sizeof(WEBSITE_PREFIX) - 1;
@@ -907,8 +943,11 @@ static void update_input(void)
 static void start_input(EditorAction field)
 {
     size_t website_prefix = sizeof(WEBSITE_PREFIX) - 1;
+    const char *dashboard = field == ITEM_WEBSITE ? home_assistant_address(editor.command) : NULL;
     const char *value = field == ITEM_NAME ? editor.name : editor.command;
-    if (field == ITEM_WEBSITE)
+    if (dashboard != NULL)
+        value = valid_home_assistant_url(dashboard) ? dashboard : "";
+    else if (field == ITEM_WEBSITE)
         value = strncmp(value, WEBSITE_PREFIX, website_prefix) == 0 ? value + website_prefix : "";
     size_t length = strlen(value);
     editor.capacity = SDL_max((size_t)TEXT_LIMIT + 1, length + 1);
@@ -923,13 +962,22 @@ static void start_input(EditorAction field)
     editor.text_field = field;
     editor.view = VIEW_TEXT;
     editor.focus = ITEM_DONE;
-    set_notice("Type or paste with Ctrl+V. Enter applies the value. Esc cancels.", false);
-    label(&editor.text_title, editor.heading_font, item_names[field], white);
+    set_notice(dashboard != NULL ? "Enter your Home Assistant dashboard address or paste with Ctrl+V. Press Enter to apply." :
+        "Type or paste with Ctrl+V. Enter applies the value. Esc cancels.", false);
+    label(&editor.text_title, editor.heading_font, dashboard != NULL ? DASHBOARD_URL : item_names[field], white);
     update_items();
     update_input();
     SDL_Rect position = rect_for(252, 397, 1416, 105);
     SDL_SetTextInputRect(&position);
     SDL_StartTextInput();
+}
+
+void app_editor_configure_home_assistant(int index)
+{
+    Entry *entry = entry_at(index);
+    if (editor.view == VIEW_LIST && entry != NULL && home_assistant_address(entry->cmd) != NULL &&
+        start_edit(entry, false))
+        start_input(ITEM_WEBSITE);
 }
 
 static void close_input(void)
@@ -944,8 +992,13 @@ static void close_input(void)
 
 static void commit_input(void)
 {
-    size_t prefix = editor.text_field == ITEM_WEBSITE ? sizeof(WEBSITE_PREFIX) - 1 : 0;
-    if (prefix != 0 && !valid_website_url(editor.input)) {
+    bool website = editor.text_field == ITEM_WEBSITE;
+    bool dashboard = website && home_assistant_address(editor.command) != NULL;
+    if (dashboard && *editor.input != '\0' && !valid_home_assistant_url(editor.input)) {
+        set_notice("Use an HTTP or HTTPS dashboard address without sign-in details, a query or a fragment.", true);
+        return;
+    }
+    if (website && !dashboard && !valid_website_url(editor.input)) {
         set_notice("Enter an address starting with http:// or https://.", true);
         return;
     }
@@ -953,14 +1006,15 @@ static void commit_input(void)
         set_notice("Names cannot contain a semicolon.", true);
         return;
     }
-    char *value = malloc(strlen(editor.input) + prefix + 1);
+    const char *prefix = dashboard ? (*editor.input ? SCMD_HOME_ASSISTANT " " : SCMD_HOME_ASSISTANT) :
+        (website ? WEBSITE_PREFIX : "");
+    size_t size = strlen(prefix) + strlen(editor.input) + 1;
+    char *value = malloc(size);
     if (value == NULL) {
         set_notice("Could not store the new value.", true);
         return;
     }
-    if (prefix != 0)
-        memcpy(value, WEBSITE_PREFIX, prefix);
-    strcpy(value + prefix, editor.input);
+    SDL_snprintf(value, size, "%s%s", prefix, editor.input);
     char **target = editor.text_field == ITEM_NAME ? &editor.name : &editor.command;
     free(*target);
     *target = value;
@@ -1116,13 +1170,17 @@ static void activate(EditorAction action)
             choose_library_icon(index);
         else {
             choose_row(action);
-            start_edit(editor.selected);
+            start_edit(editor.selected, false);
         }
         return;
     }
     switch (action) {
-        case ITEM_ADD: start_edit(NULL); break;
-        case ITEM_EDIT: start_edit(editor.selected); break;
+        case ITEM_ADD: start_edit(NULL, false); break;
+        case ITEM_ADD_ASSISTANT:
+            if (start_edit(NULL, true))
+                start_input(ITEM_WEBSITE);
+            break;
+        case ITEM_EDIT: start_edit(editor.selected, false); break;
         case ITEM_UP: move_entry(true); break;
         case ITEM_DOWN: move_entry(false); break;
         case ITEM_REMOVE:

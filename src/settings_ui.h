@@ -5,6 +5,7 @@
 #include <SDL.h>
 
 bool settings_open(void);
+bool settings_open_home_assistant(int index);
 bool settings_is_open(void);
 void settings_command(const char *command);
 void settings_mouse(int x, int y, bool click);

@@ -8,6 +8,7 @@
 // Include launcher.h before this header.
 bool app_editor_open(const Entry *entries, const Entry *stop,
     TTF_Font *heading, TTF_Font *body, TTF_Font *small);
+void app_editor_configure_home_assistant(int index);
 bool app_editor_is_open(void);
 bool app_editor_is_typing(void);
 void app_editor_command(const char *command);

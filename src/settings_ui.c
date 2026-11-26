@@ -322,6 +322,24 @@ static void close_settings(void)
     request_launcher_redraw();
 }
 
+static bool open_application_editor(void)
+{
+    if (open_launcher_app_editor(ui.heading_font, ui.body_font, ui.small_font))
+        return true;
+    set_notice("Could not open the application editor.", caution);
+    return false;
+}
+
+bool settings_open_home_assistant(int index)
+{
+    if (!settings_open())
+        return false;
+    ui.selected = ROW_APPS;
+    if (open_application_editor())
+        app_editor_configure_home_assistant(index);
+    return true;
+}
+
 static void activate(int direction)
 {
     if (ui.selected < ROW_SAVE) {
@@ -334,8 +352,7 @@ static void activate(int direction)
         return;
     }
     if (ui.selected == ROW_APPS) {
-        if (!open_launcher_app_editor(ui.heading_font, ui.body_font, ui.small_font))
-            set_notice("Could not open the application editor.", caution);
+        open_application_editor();
         return;
     }
     if (ui.selected == ROW_BACK || !edited()) {

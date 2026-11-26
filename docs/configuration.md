@@ -62,6 +62,12 @@ From Settings, open **Applications and Icons** to edit the cards on Home. **Add 
 
 Choose **Done** to stage each edit. Select a card and use **Move up**, **Move down**, or **Remove** to change the Home list. **Save and return** applies the updated cards and order immediately and preserves other menus and settings in the INI. Use a keyboard or paste when entering names, commands or addresses.
 
+### Home Assistant
+
+Select the **Home Assistant** card in the sample configuration to enter your dashboard address. To add the card to an existing configuration, open **Settings → Applications and Icons → Add Home Assistant**. You can edit the address later from the card's **Dashboard URL** field in **Applications and Icons**.
+
+Enter an HTTP or HTTPS address with your dashboard's hostname, port if needed, and path. Remove any sign-in details, query string, or fragment from a copied address. Choose **Done**, then **Save and return**. Selecting the configured card opens the dashboard in your default browser, where you can sign in.
+
 ## Settings
 The following sections contain settings that control the look and behavior of the launcher:
 - [General](#general)
@@ -462,6 +468,9 @@ Change to a different menu. Requires a menu title as an argument. For example, t
 
 #### :website
 Open an HTTP or HTTPS URL in the default browser, for example `:website https://example.com/`. The Applications and Icons editor uses this command for website cards.
+
+#### :home-assistant
+Open a Home Assistant dashboard in the default browser. The Home Assistant card stores its dashboard URL in this command and uses `:home-assistant-icon` for its built-in icon. With the command alone, selecting the card opens the dashboard address editor.
 
 #### :fork
 Forks a new process and executes a command in it without exiting the launcher. This is typically used in combination with a [hotkey](#hotkeys). Use this special command when you want to execute a command on your system for some reason other than launching a graphical application. Example use cases:

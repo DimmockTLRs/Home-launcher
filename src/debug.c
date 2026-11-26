@@ -8,6 +8,7 @@
 #include <launcher_config.h>
 #include "util.h"
 #include "debug.h"
+#include "website.h"
 #include "platform/platform.h"
 #ifdef __unix__
 #include "platform/unix.h"
@@ -201,7 +202,8 @@ void debug_menu_entries(Menu *first_menu, size_t num_menus)
         for (size_t j = 0; j < menu->num_entries; j++) {
             log_debug("Entry %i Title: %s",j,entry->title);
             log_debug("Entry %i Icon Path: %s",j,entry->icon_path);
-            log_debug("Entry %i Command: %s",j,entry->cmd);
+            log_debug("Entry %i Command: %s",j,
+                home_assistant_address(entry->cmd) != NULL ? SCMD_HOME_ASSISTANT : entry->cmd);
             if (j != menu->num_entries - 1)
                 log_debug("");
             entry = entry->next;
