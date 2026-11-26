@@ -1227,6 +1227,15 @@ static void focus_action(EditorAction action)
 
 static void move_focus(int horizontal, int vertical)
 {
+    if (editor.focus == ITEM_ADD && horizontal > 0) {
+        focus_action(ITEM_ADD_ASSISTANT);
+        return;
+    }
+    if (editor.focus == ITEM_ADD_ASSISTANT && horizontal < 0) {
+        focus_action(ITEM_ADD);
+        return;
+    }
+
     SDL_Rect origin = {0};
     for (int i = 0; i < editor.item_count; i++) {
         if (editor.items[i].action == editor.focus) {
